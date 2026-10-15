@@ -6,7 +6,7 @@ import random
 import requests
 from bs4 import BeautifulSoup
 from telegram import Bot, InputMediaPhoto
-from telegram.constants import ParseMode
+from telegram import ParseMode
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
