@@ -104,3 +104,132 @@ def parse_car(url):
 
         transmission = ""
         for t in ["Автомат", "Механика", "Вариатор", "Робот"]:
+            if t in text:
+                transmission = t
+                break
+
+        # Фото
+        photos = []
+        for img in soup.find_all("img"):
+            src = img.get("src") or ""
+            if "carpicture" in src and "encar.com" in src:
+                # берём более качественную версию
+                clean = re.sub(r"impolicy=[^&]+", "impolicy=heightRate&rh=720&cw=960&ch=720", src)
+                if clean not in photos:
+                    photos.append(clean)
+            if len(photos) >= MAX_PHOTOS:
+                break
+
+        # Фильтры
+        if year and year < 2021:
+            return None
+        if not title or not price:
+            return None
+
+        return {
+            "id": car_id,
+            "url": url,
+            "title": title,
+            "year": year,
+            "mileage": mileage,
+            "hp": hp,
+            "engine": engine,
+            "fuel": fuel,
+            "transmission": transmission,
+            "price": price,
+            "photos": photos[:MAX_PHOTOS],
+            "is_prefer": hp is not None and hp <= 160
+        }
+    except Exception as e:
+        print(f"Ошибка парсинга {url}: {e}")
+        return None
+
+def format_caption(car):
+    lines = [f"<b>{car['title']}</b>", ""]
+    if car.get("year"):
+        lines.append(f"📅 {car['year']} год")
+    if car.get("mileage"):
+        lines.append(f"🛣 {car['mileage']}")
+    
+    specs = []
+    if car.get("engine"):
+        specs.append(car["engine"])
+    if car.get("hp"):
+        specs.append(f"{car['hp']} л.с.")
+    if car.get("fuel"):
+        specs.append(car["fuel"])
+    if car.get("transmission"):
+        specs.append(car["transmission"])
+    if specs:
+        lines.append("⚙️ " + " · ".join(specs))
+    
+    lines.append("")
+    lines.append(f"💰 <b>Под ключ: {car['price']}</b>")
+    lines.append("(до Владивостока)")
+    lines.append("")
+    lines.append(f"<a href=\"{car['url']}\">Открыть автомобиль</a>")
+    
+    return "\n".join(lines)
+
+def main():
+    if not BOT_TOKEN or not CHAT_ID:
+        print("Нет BOT_TOKEN или CHAT_ID")
+        return
+
+    bot = Bot(token=BOT_TOKEN)
+    posted = load_posted()
+    print(f"Уже опубликовано: {len(posted)} машин")
+
+    # Собираем ссылки (больше из Китая)
+    china_links = get_car_links("china", pages=4)
+    korea_links = get_car_links("korea", pages=2)
+    
+    all_links = china_links + korea_links
+    random.shuffle(all_links)
+
+    candidates = []
+    for link in all_links:
+        car_id = link.rstrip("/").split("-")[-1]
+        if car_id in posted:
+            continue
+        car = parse_car(link)
+        if car:
+            candidates.append(car)
+            # приоритет проходным
+            if len(candidates) >= 30:
+                break
+        time.sleep(1.5)
+
+    # Сортируем: сначала проходные (≤160 л.с.), потом остальные
+    candidates.sort(key=lambda x: (not x["is_prefer"], random.random()))
+
+    to_post = candidates[:CARS_PER_DAY]
+    print(f"Будем публиковать: {len(to_post)} машин")
+
+    for car in to_post:
+        try:
+            caption = format_caption(car)
+            photos = car["photos"]
+
+            if photos:
+                media = []
+                for i, photo in enumerate(photos):
+                    if i == 0:
+                        media.append(InputMediaPhoto(media=photo, caption=caption, parse_mode=ParseMode.HTML))
+                    else:
+                        media.append(InputMediaPhoto(media=photo))
+                bot.send_media_group(chat_id=CHAT_ID, media=media)
+            else:
+                bot.send_message(chat_id=CHAT_ID, text=caption, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+
+            posted.add(car["id"])
+            print(f"Опубликовано: {car['title']}")
+            time.sleep(3)
+        except Exception as e:
+            print(f"Ошибка публикации {car['title']}: {e}")
+
+    save_posted(posted)
+    print("Готово!")
+
+if __name__ == "__main__":
+    main()
