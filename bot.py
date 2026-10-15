@@ -209,8 +209,9 @@ def parse_car(url):
         price = ""
         price_match = re.search(r"(\d[\d\s]{4,})\s*₽", text)
         if price_match:
-            price = price_match.group(1).replace(" ", "")
-            price = f"{int(price):,}".replace(",", " ") + " ₽"
+            digits = re.sub(r"\D", "", price_match.group(1))  # убираем все пробелы, в т.ч. неразрывные
+            if digits:
+                price = f"{int(digits):,}".replace(",", " ") + " ₽"
 
         specs = parse_specs(text)
 
