@@ -5,6 +5,7 @@ import re
 import time
 import random
 import requests
+from urllib.parse import urlparse, parse_qs, unquote
 from bs4 import BeautifulSoup
 from telegram import Bot, InputMediaPhoto, ParseMode
 
@@ -13,11 +14,14 @@ CHAT_ID = os.getenv("CHAT_ID")
 POSTED_FILE = "posted_cars.json"
 CARS_PER_DAY = 8
 MAX_PHOTOS = 10
+MAX_CHECK = 12  # сколько машин проверять за запуск (потом можно поднять до 40)
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://asia-partner.ru/",
-}
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+HEADERS = {"User-Agent": UA, "Referer": "https://asia-partner.ru/"}
+HEADERS_AUTO = {"User-Agent": UA, "Referer": "https://www.autohome.com.cn/"}
+HEADERS_ENCAR = {"User-Agent": UA, "Referer": "https://www.encar.com/"}
+HEADERS_NO_REF = {"User-Agent": UA}
+
 
 def load_posted():
     try:
@@ -26,9 +30,11 @@ def load_posted():
     except Exception:
         return set()
 
+
 def save_posted(posted):
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
         json.dump(list(posted), f, ensure_ascii=False, indent=2)
+
 
 def get_car_links(market="china", pages=3):
     links = []
@@ -45,7 +51,27 @@ def get_car_links(market="china", pages=3):
             time.sleep(1)
         except Exception as e:
             print(f"Ошибка списка {market} стр {page}: {e}", flush=True)
+    print(f"Ссылок {market}: {len(links)}", flush=True)
     return links
+
+
+def unwrap(u):
+    """asia-partner.ru/img?src=<настоящий адрес> -> настоящий адрес"""
+    if "/img?" in u and "src=" in u:
+        try:
+            q = parse_qs(urlparse(u).query)
+            if q.get("src"):
+                return unquote(q["src"][0])
+        except Exception:
+            pass
+    return u
+
+
+def photo_key(u):
+    orig = unwrap(u)
+    name = orig.split("?")[0].split("/")[-1]
+    return re.sub(r"^\d+x\d+_", "", name)
+
 
 def extract_photos(soup, html):
     urls = []
@@ -60,43 +86,80 @@ def extract_photos(soup, html):
     for m in soup.find_all("meta", attrs={"property": "og:image"}):
         if m.get("content"):
             urls.append(m["content"])
-    urls += re.findall(r'https?://[^"\'\s)\\]+carpicture[^"\'\s)\\]+', html)
+    # ссылки на картинки прямо в тексте страницы (в том числе внутри скриптов)
+    urls += re.findall(r'(?:https?:)?\\?/\\?/[^"\'\s)<>]+?\.(?:jpg|jpeg|png|webp)[^"\'\s)<>]*', html)
+    urls += re.findall(r'/img\?src=[^"\'\s)<>]+', html)
 
     clean = []
     for u in urls:
-        u = u.replace("&amp;", "&")
+        u = u.replace("\\/", "/").replace("&amp;", "&").replace("\\u0026", "&")
         if u.startswith("//"):
             u = "https:" + u
         elif u.startswith("/"):
             u = "https://asia-partner.ru" + u
         if not u.startswith("http"):
             continue
-        if u not in clean:
-            clean.append(u)
+        clean.append(u)
 
-    car_pics = [u for u in clean if "carpicture" in u]
-    if car_pics:
-        result = []
-        for u in car_pics:
-            u = re.sub(r"impolicy=[^&]+", "impolicy=heightRate&rh=720&cw=960&ch=720", u)
-            if u not in result:
-                result.append(u)
-        return result
+    bad = ("logo", "icon", "avatar", "sprite", ".svg", "banner", "favicon", "wt_mark")
+    result, seen = [], set()
+    for u in clean:
+        orig = unwrap(u).lower()
+        if any(b in orig.split("?")[0] for b in bad):
+            continue
+        if not re.search(r"\.(jpg|jpeg|png|webp)", orig):
+            continue
+        k = photo_key(u)
+        if k in seen:
+            continue
+        seen.add(k)
+        result.append(u)
 
-    bad = ("logo", "icon", "avatar", "sprite", ".svg", "banner")
-    return [u for u in clean
-            if re.search(r"\.(jpg|jpeg|png|webp)", u.lower())
-            and not any(b in u.lower() for b in bad)]
+    # приоритет: фото с автомобильных площадок (autoimg, encar и т.п.)
+    pref = [u for u in result if any(d in unwrap(u) for d in ("autoimg", "carpicture", "encar", "che168", "dongchedi"))]
+    return pref if pref else result
 
-def download_image(url):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        ctype = r.headers.get("Content-Type", "")
-        if r.ok and "image" in ctype and len(r.content) > 5000:
-            return r.content
-    except Exception:
-        pass
+
+def candidates_for(u):
+    orig = unwrap(u)
+    cands = []
+    if orig != u:
+        big = re.sub(r"/\d+x\d+_", "/960x720_", orig)
+        for x in (big, orig):
+            if x.endswith(".webp"):
+                cands.append(x[:-5])
+            cands.append(x)
+    elif "carpicture" in u:
+        cands.append(re.sub(r"impolicy=[^&]+", "impolicy=heightRate&rh=720&cw=960&ch=720", u))
+    cands.append(u)
+    out = []
+    for c in cands:
+        if c not in out:
+            out.append(c)
+    return out
+
+
+def headers_for(cand):
+    if "autoimg" in cand or "autohome" in cand:
+        return (HEADERS_AUTO, HEADERS_NO_REF)
+    if "encar.com" in cand:
+        return (HEADERS_ENCAR, HEADERS_NO_REF)
+    return (HEADERS, HEADERS_NO_REF)
+
+
+def download_image(u):
+    for cand in candidates_for(u):
+        for hdrs in headers_for(cand):
+            try:
+                r = requests.get(cand, headers=hdrs, timeout=20)
+                ctype = r.headers.get("Content-Type", "")
+                print(f"  фото {r.status_code} {ctype} {len(r.content)} байт: {cand[:100]}", flush=True)
+                if r.ok and "image" in ctype and len(r.content) > 5000:
+                    return r.content
+            except Exception as e:
+                print(f"  ошибка фото: {e}", flush=True)
     return None
+
 
 def parse_car(url):
     try:
@@ -153,20 +216,31 @@ def parse_car(url):
                 break
 
         photo_urls = extract_photos(soup, r.text)
-        print(f"{url}: найдено ссылок на фото: {len(photo_urls)}", flush=True)
+        print(f"{url[:80]}", flush=True)
+        print(f"  HTML {len(r.text)} симв, img-тегов {len(soup.find_all('img'))}, "
+              f"название: {title[:40]!r}, цена: {price!r}, год: {year}", flush=True)
+        print(f"  найдено фото: {len(photo_urls)}", flush=True)
+        print("  примеры:", [p[:110] for p in photo_urls[:2]], flush=True)
 
         if year and year < 2021:
+            print("  пропуск: старше 2021", flush=True)
             return None
         if not title or not price:
+            print("  пропуск: нет названия или цены", flush=True)
             return None
 
         photos = []
+        failed = 0
         for pu in photo_urls:
             data = download_image(pu)
             if data:
                 photos.append(data)
+            else:
+                failed += 1
             if len(photos) >= MAX_PHOTOS:
                 break
+            if not photos and failed >= 3:
+                break  # первые 3 не скачались, дальше смысла нет
         print(f"  скачано фото: {len(photos)}", flush=True)
         if not photos:
             return None
@@ -180,6 +254,7 @@ def parse_car(url):
     except Exception as e:
         print(f"Ошибка парсинга {url}: {e}", flush=True)
         return None
+
 
 def format_caption(car):
     lines = [f"<b>{car['title']}</b>", ""]
@@ -203,6 +278,7 @@ def format_caption(car):
     lines.append("(до Владивостока)")
     return "\n".join(lines)
 
+
 def main():
     if not BOT_TOKEN or not CHAT_ID:
         print("Нет BOT_TOKEN или CHAT_ID", flush=True)
@@ -216,20 +292,24 @@ def main():
     random.shuffle(all_links)
 
     candidates = []
+    checked = 0
     for link in all_links:
         car_id = link.rstrip("/").split("-")[-1]
         if car_id in posted:
             continue
+        if checked >= MAX_CHECK:
+            break
+        checked += 1
         car = parse_car(link)
         if car:
             candidates.append(car)
-            if len(candidates) >= 15:
+            if len(candidates) >= CARS_PER_DAY * 2:
                 break
         time.sleep(1.5)
 
     candidates.sort(key=lambda x: (not x["is_prefer"], random.random()))
     to_post = candidates[:CARS_PER_DAY]
-    print(f"Будем публиковать: {len(to_post)} машин", flush=True)
+    print(f"Проверено: {checked}, годных: {len(candidates)}, публикуем: {len(to_post)}", flush=True)
 
     for car in to_post:
         try:
@@ -251,6 +331,7 @@ def main():
 
     save_posted(posted)
     print("Готово!", flush=True)
+
 
 if __name__ == "__main__":
     main()
