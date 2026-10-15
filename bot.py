@@ -4,23 +4,37 @@ import json
 import re
 import time
 import random
+import html as htmllib
 import requests
 from urllib.parse import urlparse, parse_qs, unquote
 from bs4 import BeautifulSoup
 from telegram import Bot, InputMediaPhoto, ParseMode
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 POSTED_FILE = "posted_cars.json"
 CARS_PER_DAY = 8
 MAX_PHOTOS = 10
-MAX_CHECK = 12  # сколько машин проверять за запуск (потом можно поднять до 40)
+MAX_CHECK = 40  # сколько машин проверять за запуск
+
+# --- сторис ---
+GROUP_USERNAME = "ASIAMOTORS_ROSTOV"
+BRAND = "ASIA MOTORS · РОСТОВ"
+STORIES_PER_DAY = 3
+BC_PREFIX = "bc:"  # так бот хранит id бизнес-подключения внутри posted_cars.json
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 HEADERS = {"User-Agent": UA, "Referer": "https://asia-partner.ru/"}
 HEADERS_AUTO = {"User-Agent": UA, "Referer": "https://www.autohome.com.cn/"}
 HEADERS_ENCAR = {"User-Agent": UA, "Referer": "https://www.encar.com/"}
 HEADERS_NO_REF = {"User-Agent": UA}
+
+LABELS = [
+    "Год выпуска", "Пробег", "Объём двигателя", "Мощность",
+    "Мощность для растаможки", "Тип топлива", "Коробка передач",
+    "Привод", "Цвет", "Класс", "Мест", "Комплектация", "VIN",
+]
 
 
 def load_posted():
@@ -86,7 +100,6 @@ def extract_photos(soup, html):
     for m in soup.find_all("meta", attrs={"property": "og:image"}):
         if m.get("content"):
             urls.append(m["content"])
-    # ссылки на картинки прямо в тексте страницы (в том числе внутри скриптов)
     urls += re.findall(r'(?:https?:)?\\?/\\?/[^"\'\s)<>]+?\.(?:jpg|jpeg|png|webp)[^"\'\s)<>]*', html)
     urls += re.findall(r'/img\?src=[^"\'\s)<>]+', html)
 
@@ -115,7 +128,6 @@ def extract_photos(soup, html):
         seen.add(k)
         result.append(u)
 
-    # приоритет: фото с автомобильных площадок (autoimg, encar и т.п.)
     pref = [u for u in result if any(d in unwrap(u) for d in ("autoimg", "carpicture", "encar", "che168", "dongchedi"))]
     return pref if pref else result
 
@@ -161,6 +173,25 @@ def download_image(u):
     return None
 
 
+def parse_specs(text):
+    """Читает блок 'Характеристики': строка-название, следующая строка-значение."""
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    start = 0
+    for i, l in enumerate(lines):
+        if l == "Год выпуска":
+            start = i
+            break
+    specs = {}
+    i = start
+    while i < len(lines) - 1:
+        if lines[i] in LABELS and lines[i] not in specs and lines[i + 1] not in LABELS:
+            specs[lines[i]] = lines[i + 1]
+            i += 2
+        else:
+            i += 1
+    return specs
+
+
 def parse_car(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=25)
@@ -168,59 +199,52 @@ def parse_car(url):
         text = soup.get_text("\n", strip=True)
 
         car_id = url.rstrip("/").split("-")[-1]
+        market = "korea" if "/cars/korea/" in url else "china"
 
         title = ""
         h1 = soup.find("h1")
         if h1:
-            title = h1.get_text(strip=True)
+            title = re.sub(r"\s+", " ", h1.get_text(" ", strip=True)).strip()
 
         price = ""
         price_match = re.search(r"(\d[\d\s]{4,})\s*₽", text)
         if price_match:
-            price = price_match.group(1).replace(" ", "") + " ₽"
+            price = price_match.group(1).replace(" ", "")
+            price = f"{int(price):,}".replace(",", " ") + " ₽"
+
+        specs = parse_specs(text)
+
+        if "Год выпуска" not in specs:
+            m = re.search(r"(?:Год выпуска|Октябрь|Январь|Февраль|Март|Апрель|Май|Июнь|Июль|Август|Сентябрь|Ноябрь|Декабрь)\s*(\d{4})", text)
+            if m:
+                specs["Год выпуска"] = m.group(1)
+        if "Пробег" not in specs:
+            m = re.search(r"([\d\s]+)\s*км", text)
+            if m:
+                specs["Пробег"] = m.group(1).strip() + " км"
+        if "Мощность" not in specs:
+            m = re.search(r"(\d+)\s*л\.?\s*с", text)
+            if m:
+                specs["Мощность"] = m.group(1) + " л.с."
+        if "Объём двигателя" not in specs:
+            m = re.search(r"([\d\s]+)\s*см³", text)
+            if m:
+                specs["Объём двигателя"] = m.group(1).strip() + " см³"
 
         year = None
-        year_match = re.search(r"(?:Год выпуска|Октябрь|Январь|Февраль|Март|Апрель|Май|Июнь|Июль|Август|Сентябрь|Ноябрь|Декабрь)\s*(\d{4})", text)
-        if year_match:
-            year = int(year_match.group(1))
-        else:
-            year_match2 = re.search(r"(\d{4})\s*год", text)
-            if year_match2:
-                year = int(year_match2.group(1))
-
-        mileage = ""
-        mile_match = re.search(r"([\d\s]+)\s*км", text)
-        if mile_match:
-            mileage = mile_match.group(1).strip() + " км"
+        ym = re.search(r"(\d{4})", specs.get("Год выпуска", ""))
+        if ym:
+            year = int(ym.group(1))
 
         hp = None
-        hp_match = re.search(r"(\d+)\s*л\.?\s*с", text)
-        if hp_match:
-            hp = int(hp_match.group(1))
-
-        engine = ""
-        eng_match = re.search(r"([\d\s]+)\s*см³", text)
-        if eng_match:
-            engine = eng_match.group(1).strip() + " см³"
-
-        fuel = ""
-        for f in ["Бензин", "Дизель", "Гибрид", "Электро"]:
-            if f in text:
-                fuel = f
-                break
-
-        transmission = ""
-        for t in ["Автомат", "Механика", "Вариатор", "Робот"]:
-            if t in text:
-                transmission = t
-                break
+        hm = re.search(r"(\d+)", specs.get("Мощность", ""))
+        if hm:
+            hp = int(hm.group(1))
 
         photo_urls = extract_photos(soup, r.text)
         print(f"{url[:80]}", flush=True)
-        print(f"  HTML {len(r.text)} симв, img-тегов {len(soup.find_all('img'))}, "
-              f"название: {title[:40]!r}, цена: {price!r}, год: {year}", flush=True)
+        print(f"  название: {title[:40]!r}, цена: {price!r}, год: {year}, характеристик: {len(specs)}", flush=True)
         print(f"  найдено фото: {len(photo_urls)}", flush=True)
-        print("  примеры:", [p[:110] for p in photo_urls[:2]], flush=True)
 
         if year and year < 2021:
             print("  пропуск: старше 2021", flush=True)
@@ -240,15 +264,15 @@ def parse_car(url):
             if len(photos) >= MAX_PHOTOS:
                 break
             if not photos and failed >= 3:
-                break  # первые 3 не скачались, дальше смысла нет
+                break
         print(f"  скачано фото: {len(photos)}", flush=True)
         if not photos:
             return None
 
         return {
-            "id": car_id, "url": url, "title": title, "year": year,
-            "mileage": mileage, "hp": hp, "engine": engine, "fuel": fuel,
-            "transmission": transmission, "price": price, "photos": photos,
+            "id": car_id, "url": url, "market": market, "title": title,
+            "year": year, "hp": hp, "specs": specs, "price": price,
+            "photos": photos,
             "is_prefer": hp is not None and hp <= 160,
         }
     except Exception as e:
@@ -256,28 +280,282 @@ def parse_car(url):
         return None
 
 
-def format_caption(car):
-    lines = [f"<b>{car['title']}</b>", ""]
-    if car.get("year"):
-        lines.append(f"📅 {car['year']} год")
-    if car.get("mileage"):
-        lines.append(f"🛣 {car['mileage']}")
-    specs = []
-    if car.get("engine"):
-        specs.append(car["engine"])
-    if car.get("hp"):
-        specs.append(f"{car['hp']} л.с.")
-    if car.get("fuel"):
-        specs.append(car["fuel"])
-    if car.get("transmission"):
-        specs.append(car["transmission"])
-    if specs:
-        lines.append("⚙️ " + " · ".join(specs))
+def esc(s):
+    return htmllib.escape(str(s), quote=False)
+
+
+def format_caption(car, full=True):
+    s = car["specs"]
+    flag = "🇰🇷" if car.get("market") == "korea" else "🇨🇳"
+    lines = [f"{flag} <b>{esc(car['title'])}</b>"]
+
+    summary = [s.get("Год выпуска"), s.get("Пробег"), s.get("Мощность")]
+    summary = [x for x in summary if x]
+    if summary:
+        lines.append(esc(" · ".join(summary)))
+
     lines.append("")
-    lines.append(f"💰 <b>Под ключ: {car['price']}</b>")
+    lines.append("<b>Характеристики</b>")
+
+    def add(icon, label, key):
+        if s.get(key):
+            lines.append(f"{icon} {label}: {esc(s[key])}")
+
+    add("📅", "Год выпуска", "Год выпуска")
+    add("🛣", "Пробег", "Пробег")
+    add("⚙️", "Объём двигателя", "Объём двигателя")
+    add("🐎", "Мощность", "Мощность")
+    add("📋", "Для растаможки", "Мощность для растаможки")
+    add("⛽", "Топливо", "Тип топлива")
+    add("🔧", "КПП", "Коробка передач")
+    add("🚙", "Привод", "Привод")
+    add("🎨", "Цвет", "Цвет")
+
+    cls = " · ".join(
+        x for x in [s.get("Класс"), (s.get("Мест") + " мест") if s.get("Мест") else None] if x
+    )
+    if cls:
+        lines.append(f"🚘 Класс: {esc(cls)}")
+
+    if full:
+        add("🏷", "Комплектация", "Комплектация")
+        add("🔑", "VIN", "VIN")
+
+    lines.append("")
+    lines.append(f"💰 <b>Под ключ: {esc(car['price'])}</b>")
     lines.append("(до Владивостока)")
     return "\n".join(lines)
 
+
+def build_caption(car):
+    cap = format_caption(car, full=True)
+    if len(cap) > 1000:
+        cap = format_caption(car, full=False)
+    return cap[:1024]
+
+
+# ======================= СТОРИС =======================
+
+FONT_BOLD = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+]
+FONT_REG = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+]
+_font_warned = False
+
+
+def load_font(paths, size):
+    global _font_warned
+    for p in paths:
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    if not _font_warned:
+        print("  ВНИМАНИЕ: не найден шрифт с кириллицей, текст на сторис может быть кривым", flush=True)
+        _font_warned = True
+    try:
+        return ImageFont.load_default(size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def fit_cover(img, w, h):
+    scale = max(w / img.width, h / img.height)
+    nw, nh = int(img.width * scale) + 1, int(img.height * scale) + 1
+    img = img.resize((nw, nh), Image.LANCZOS)
+    left, top = (nw - w) // 2, (nh - h) // 2
+    return img.crop((left, top, left + w, top + h))
+
+
+def paste_rounded(base, img, xy, radius):
+    mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, img.width - 1, img.height - 1], radius=radius, fill=255)
+    base.paste(img, xy, mask)
+
+
+def wrap_text(draw, text, font, max_w, max_lines):
+    words = text.split()
+    lines, cur = [], ""
+    for w in words:
+        test = (cur + " " + w).strip()
+        if draw.textlength(test, font=font) <= max_w:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        while last and draw.textlength(last + "…", font=font) > max_w:
+            last = last[:-1]
+        lines[-1] = last.rstrip() + "…"
+    return lines
+
+
+def make_story_image(car):
+    """Возвращает (jpeg-байты, позиция кнопки для ссылки) или None."""
+    imgs = []
+    for data in car["photos"][:3]:
+        try:
+            imgs.append(Image.open(io.BytesIO(data)).convert("RGB"))
+        except Exception:
+            pass
+    if not imgs:
+        return None
+    hero, extra = imgs[0], imgs[1:3]
+
+    W, H, M = 1080, 1920, 48
+    card_w = W - 2 * M
+
+    bg = fit_cover(hero, W, H).filter(ImageFilter.GaussianBlur(30))
+    canvas = ImageEnhance.Brightness(bg).enhance(0.40).convert("RGB")
+    draw = ImageDraw.Draw(canvas)
+
+    draw.text((W // 2, 128), BRAND, font=load_font(FONT_BOLD, 32),
+              fill=(255, 255, 255), anchor="mm")
+
+    hero_y = 170
+    hero_h = 738 if extra else 1080
+    paste_rounded(canvas, fit_cover(hero, card_w, hero_h), (M, hero_y), 36)
+
+    # плашка страны на главном фото
+    is_korea = car.get("market") == "korea"
+    label = "КОРЕЯ" if is_korea else "КИТАЙ"
+    color = (0, 71, 160) if is_korea else (215, 38, 24)
+    f_pill = load_font(FONT_BOLD, 34)
+    tw = draw.textlength(label, font=f_pill)
+    px, py = M + 24, hero_y + 24
+    draw.rounded_rectangle([px, py, px + tw + 48, py + 64], radius=32, fill=color)
+    draw.text((px + 24 + tw / 2, py + 32), label, font=f_pill,
+              fill=(255, 255, 255), anchor="mm")
+
+    y = hero_y + hero_h + 28
+
+    # две маленькие фотографии с других ракурсов
+    if extra:
+        th = 260
+        if len(extra) == 1:
+            paste_rounded(canvas, fit_cover(extra[0], card_w, th), (M, y), 28)
+        else:
+            tw2 = (card_w - 24) // 2
+            for i, im in enumerate(extra):
+                paste_rounded(canvas, fit_cover(im, tw2, th), (M + i * (tw2 + 24), y), 28)
+        y += th + 28
+
+    # название
+    f_title = load_font(FONT_BOLD, 64)
+    for line in wrap_text(draw, car["title"], f_title, card_w, 2):
+        draw.text((M, y), line, font=f_title, fill=(255, 255, 255))
+        y += 76
+
+    # год · пробег · мощность
+    s = car["specs"]
+    spec_line = " · ".join(x for x in [s.get("Год выпуска"), s.get("Пробег"), s.get("Мощность")] if x)
+    if spec_line:
+        draw.text((M, y + 2), spec_line, font=load_font(FONT_REG, 38), fill=(225, 225, 225))
+        y += 60
+
+    # цена
+    y += 10
+    draw.text((M, y), "ПОД КЛЮЧ ДО ВЛАДИВОСТОКА", font=load_font(FONT_BOLD, 28), fill=(255, 196, 61))
+    y += 40
+    size = 90
+    f_price = load_font(FONT_BOLD, size)
+    while draw.textlength(car["price"], font=f_price) > card_w and size > 50:
+        size -= 6
+        f_price = load_font(FONT_BOLD, size)
+    draw.text((M, y), car["price"], font=f_price, fill=(255, 255, 255))
+    y += 104
+
+    # кнопка
+    btn_h = 90
+    by = y + 16
+    draw.rounded_rectangle([M, by, M + card_w, by + btn_h], radius=45, fill=(255, 255, 255))
+    draw.text((W // 2, by + btn_h // 2), "Смотреть в группе  →",
+              font=load_font(FONT_BOLD, 40), fill=(20, 20, 20), anchor="mm")
+
+    position = {
+        "x_percentage": 50.0,
+        "y_percentage": round((by + btn_h / 2) / H * 100, 2),
+        "width_percentage": round(card_w / W * 100, 2),
+        "height_percentage": round(btn_h / H * 100, 2),
+        "rotation_angle": 0.0,
+    }
+
+    buf = io.BytesIO()
+    canvas.save(buf, "JPEG", quality=90, optimize=True)
+    return buf.getvalue(), position
+
+
+def story_caption(car, link):
+    flag = "🇰🇷" if car.get("market") == "korea" else "🇨🇳"
+    return (f"{flag} <b>{esc(car['title'])}</b>\n"
+            f"💰 Под ключ до Владивостока: <b>{esc(car['price'])}</b>\n\n"
+            f"👉 Подробности и фото в группе: {link}")
+
+
+def tg_call(method, data=None, files=None):
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
+                          data=data, files=files, timeout=120)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "description": str(e)}
+
+
+def post_story(conn_id, img_bytes, caption, area=None):
+    base = {
+        "business_connection_id": conn_id,
+        "content": json.dumps({"type": "photo", "photo": "attach://story_photo"}),
+        "active_period": 86400,
+        "caption": caption,
+        "parse_mode": "HTML",
+    }
+    attempts = []
+    if area:
+        attempts.append(dict(base, areas=json.dumps([area])))
+    attempts.append(base)  # запасной вариант: без кликабельной зоны, ссылка в подписи
+    for data in attempts:
+        res = tg_call("postStory", data=data,
+                      files={"story_photo": ("story.jpg", img_bytes, "image/jpeg")})
+        if res.get("ok"):
+            return True
+        print(f"  postStory ошибка: {res.get('description')}", flush=True)
+    return False
+
+
+def find_business_connection():
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+            params={"allowed_updates": json.dumps(["business_connection"]), "timeout": 0},
+            timeout=30)
+        res = r.json()
+        for upd in reversed(res.get("result", [])):
+            bc = upd.get("business_connection")
+            if bc and bc.get("is_enabled", True) and bc.get("id"):
+                print(f"Найдено бизнес-подключение: {bc['id']}", flush=True)
+                return bc["id"]
+        if not res.get("ok"):
+            print(f"getUpdates: {res.get('description')}", flush=True)
+    except Exception as e:
+        print(f"Ошибка поиска подключения: {e}", flush=True)
+    return None
+
+
+# ======================= ГЛАВНАЯ ЧАСТЬ =======================
 
 def main():
     if not BOT_TOKEN or not CHAT_ID:
@@ -286,7 +564,7 @@ def main():
 
     bot = Bot(token=BOT_TOKEN)
     posted = load_posted()
-    print(f"Уже опубликовано: {len(posted)} машин", flush=True)
+    print(f"Уже опубликовано: {len(posted)} записей", flush=True)
 
     all_links = get_car_links("china", pages=4) + get_car_links("korea", pages=2)
     random.shuffle(all_links)
@@ -311,9 +589,10 @@ def main():
     to_post = candidates[:CARS_PER_DAY]
     print(f"Проверено: {checked}, годных: {len(candidates)}, публикуем: {len(to_post)}", flush=True)
 
+    published = []
     for car in to_post:
         try:
-            caption = format_caption(car)
+            caption = build_caption(car)
             media = []
             for i, data in enumerate(car["photos"]):
                 bio = io.BytesIO(data)
@@ -322,12 +601,49 @@ def main():
                     media.append(InputMediaPhoto(bio, caption=caption, parse_mode=ParseMode.HTML))
                 else:
                     media.append(InputMediaPhoto(bio))
-            bot.send_media_group(chat_id=CHAT_ID, media=media, timeout=120)
+            msgs = bot.send_media_group(chat_id=CHAT_ID, media=media, timeout=120)
+            mid = msgs[0].message_id if msgs else None
             posted.add(car["id"])
-            print(f"Опубликовано: {car['title']}", flush=True)
+            published.append((car, mid))
+            print(f"Опубликовано: {car['title']} (сообщение {mid})", flush=True)
             time.sleep(3)
         except Exception as e:
             print(f"Ошибка публикации {car['title']}: {e}", flush=True)
+
+    # ---- сторис ----
+    try:
+        conn_id = os.getenv("BUSINESS_CONNECTION_ID")
+        if not conn_id:
+            stored = [x for x in posted if isinstance(x, str) and x.startswith(BC_PREFIX)]
+            if stored:
+                conn_id = stored[0][len(BC_PREFIX):]
+        if not conn_id:
+            conn_id = find_business_connection()
+            if conn_id:
+                posted.add(BC_PREFIX + conn_id)
+
+        if not conn_id:
+            print("Сторис: бот не подключён к бизнес-аккаунту (Настройки → Telegram для бизнеса → Чат-боты).", flush=True)
+        elif not published:
+            print("Сторис: нет новых машин для сторис.", flush=True)
+        else:
+            done = 0
+            for car, mid in published:
+                if done >= STORIES_PER_DAY:
+                    break
+                link = f"https://t.me/{GROUP_USERNAME}/{mid}" if mid else f"https://t.me/{GROUP_USERNAME}"
+                built = make_story_image(car)
+                if not built:
+                    continue
+                img, position = built
+                area = {"position": position, "type": {"type": "link", "url": link}}
+                if post_story(conn_id, img, story_caption(car, link), area):
+                    done += 1
+                    print(f"Сторис опубликована: {car['title']}", flush=True)
+                time.sleep(3)
+            print(f"Сторис выложено: {done}", flush=True)
+    except Exception as e:
+        print(f"Ошибка сторис: {e}", flush=True)
 
     save_posted(posted)
     print("Готово!", flush=True)
