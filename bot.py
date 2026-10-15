@@ -1,14 +1,13 @@
 import os
+import io
 import json
 import re
 import time
 import random
 import requests
 from bs4 import BeautifulSoup
-from telegram import Bot, InputMediaPhoto
-from telegram import ParseMode
+from telegram import Bot, InputMediaPhoto, ParseMode
 
-# === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 POSTED_FILE = "posted_cars.json"
@@ -16,14 +15,15 @@ CARS_PER_DAY = 8
 MAX_PHOTOS = 10
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://asia-partner.ru/",
 }
 
 def load_posted():
     try:
         with open(POSTED_FILE, "r", encoding="utf-8") as f:
             return set(json.load(f))
-    except:
+    except Exception:
         return set()
 
 def save_posted(posted):
@@ -44,8 +44,59 @@ def get_car_links(market="china", pages=3):
                     links.append(full)
             time.sleep(1)
         except Exception as e:
-            print(f"Ошибка списка {market} стр {page}: {e}")
+            print(f"Ошибка списка {market} стр {page}: {e}", flush=True)
     return links
+
+def extract_photos(soup, html):
+    urls = []
+    for img in soup.find_all("img"):
+        for attr in ("src", "data-src", "data-lazy-src", "data-original"):
+            v = img.get(attr)
+            if v:
+                urls.append(v)
+        ss = img.get("srcset")
+        if ss:
+            urls += [p.strip().split(" ")[0] for p in ss.split(",") if p.strip()]
+    for m in soup.find_all("meta", attrs={"property": "og:image"}):
+        if m.get("content"):
+            urls.append(m["content"])
+    urls += re.findall(r'https?://[^"\'\s)\\]+carpicture[^"\'\s)\\]+', html)
+
+    clean = []
+    for u in urls:
+        u = u.replace("&amp;", "&")
+        if u.startswith("//"):
+            u = "https:" + u
+        elif u.startswith("/"):
+            u = "https://asia-partner.ru" + u
+        if not u.startswith("http"):
+            continue
+        if u not in clean:
+            clean.append(u)
+
+    car_pics = [u for u in clean if "carpicture" in u]
+    if car_pics:
+        result = []
+        for u in car_pics:
+            u = re.sub(r"impolicy=[^&]+", "impolicy=heightRate&rh=720&cw=960&ch=720", u)
+            if u not in result:
+                result.append(u)
+        return result
+
+    bad = ("logo", "icon", "avatar", "sprite", ".svg", "banner")
+    return [u for u in clean
+            if re.search(r"\.(jpg|jpeg|png|webp)", u.lower())
+            and not any(b in u.lower() for b in bad)]
+
+def download_image(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        ctype = r.headers.get("Content-Type", "")
+        if r.ok and "image" in ctype and len(r.content) > 5000:
+            return r.content
+    except Exception:
+        pass
+    return None
 
 def parse_car(url):
     try:
@@ -53,22 +104,18 @@ def parse_car(url):
         soup = BeautifulSoup(r.text, "lxml")
         text = soup.get_text("\n", strip=True)
 
-        # ID машины
         car_id = url.rstrip("/").split("-")[-1]
 
-        # Название
         title = ""
         h1 = soup.find("h1")
         if h1:
             title = h1.get_text(strip=True)
 
-        # Цена под ключ
         price = ""
         price_match = re.search(r"(\d[\d\s]{4,})\s*₽", text)
         if price_match:
             price = price_match.group(1).replace(" ", "") + " ₽"
 
-        # Год
         year = None
         year_match = re.search(r"(?:Год выпуска|Октябрь|Январь|Февраль|Март|Апрель|Май|Июнь|Июль|Август|Сентябрь|Ноябрь|Декабрь)\s*(\d{4})", text)
         if year_match:
@@ -78,19 +125,16 @@ def parse_car(url):
             if year_match2:
                 year = int(year_match2.group(1))
 
-        # Пробег
         mileage = ""
         mile_match = re.search(r"([\d\s]+)\s*км", text)
         if mile_match:
             mileage = mile_match.group(1).strip() + " км"
 
-        # Мощность
         hp = None
         hp_match = re.search(r"(\d+)\s*л\.?\s*с", text)
         if hp_match:
             hp = int(hp_match.group(1))
 
-        # Объём, топливо, КПП
         engine = ""
         eng_match = re.search(r"([\d\s]+)\s*см³", text)
         if eng_match:
@@ -108,40 +152,33 @@ def parse_car(url):
                 transmission = t
                 break
 
-        # Фото
-        photos = []
-        for img in soup.find_all("img"):
-            src = img.get("src") or ""
-            if "carpicture" in src and "encar.com" in src:
-                # берём более качественную версию
-                clean = re.sub(r"impolicy=[^&]+", "impolicy=heightRate&rh=720&cw=960&ch=720", src)
-                if clean not in photos:
-                    photos.append(clean)
-            if len(photos) >= MAX_PHOTOS:
-                break
+        photo_urls = extract_photos(soup, r.text)
+        print(f"{url}: найдено ссылок на фото: {len(photo_urls)}", flush=True)
 
-        # Фильтры
         if year and year < 2021:
             return None
         if not title or not price:
             return None
 
+        photos = []
+        for pu in photo_urls:
+            data = download_image(pu)
+            if data:
+                photos.append(data)
+            if len(photos) >= MAX_PHOTOS:
+                break
+        print(f"  скачано фото: {len(photos)}", flush=True)
+        if not photos:
+            return None
+
         return {
-            "id": car_id,
-            "url": url,
-            "title": title,
-            "year": year,
-            "mileage": mileage,
-            "hp": hp,
-            "engine": engine,
-            "fuel": fuel,
-            "transmission": transmission,
-            "price": price,
-            "photos": photos[:MAX_PHOTOS],
-            "is_prefer": hp is not None and hp <= 160
+            "id": car_id, "url": url, "title": title, "year": year,
+            "mileage": mileage, "hp": hp, "engine": engine, "fuel": fuel,
+            "transmission": transmission, "price": price, "photos": photos,
+            "is_prefer": hp is not None and hp <= 160,
         }
     except Exception as e:
-        print(f"Ошибка парсинга {url}: {e}")
+        print(f"Ошибка парсинга {url}: {e}", flush=True)
         return None
 
 def format_caption(car):
@@ -150,7 +187,6 @@ def format_caption(car):
         lines.append(f"📅 {car['year']} год")
     if car.get("mileage"):
         lines.append(f"🛣 {car['mileage']}")
-    
     specs = []
     if car.get("engine"):
         specs.append(car["engine"])
@@ -162,29 +198,21 @@ def format_caption(car):
         specs.append(car["transmission"])
     if specs:
         lines.append("⚙️ " + " · ".join(specs))
-    
     lines.append("")
     lines.append(f"💰 <b>Под ключ: {car['price']}</b>")
     lines.append("(до Владивостока)")
-    lines.append("")
-    lines.append(f"<a href=\"{car['url']}\">Открыть автомобиль</a>")
-    
     return "\n".join(lines)
 
 def main():
     if not BOT_TOKEN or not CHAT_ID:
-        print("Нет BOT_TOKEN или CHAT_ID")
+        print("Нет BOT_TOKEN или CHAT_ID", flush=True)
         return
 
     bot = Bot(token=BOT_TOKEN)
     posted = load_posted()
-    print(f"Уже опубликовано: {len(posted)} машин")
+    print(f"Уже опубликовано: {len(posted)} машин", flush=True)
 
-    # Собираем ссылки (больше из Китая)
-    china_links = get_car_links("china", pages=4)
-    korea_links = get_car_links("korea", pages=2)
-    
-    all_links = china_links + korea_links
+    all_links = get_car_links("china", pages=4) + get_car_links("korea", pages=2)
     random.shuffle(all_links)
 
     candidates = []
@@ -195,41 +223,34 @@ def main():
         car = parse_car(link)
         if car:
             candidates.append(car)
-            # приоритет проходным
-            if len(candidates) >= 30:
+            if len(candidates) >= 15:
                 break
         time.sleep(1.5)
 
-    # Сортируем: сначала проходные (≤160 л.с.), потом остальные
     candidates.sort(key=lambda x: (not x["is_prefer"], random.random()))
-
     to_post = candidates[:CARS_PER_DAY]
-    print(f"Будем публиковать: {len(to_post)} машин")
+    print(f"Будем публиковать: {len(to_post)} машин", flush=True)
 
     for car in to_post:
         try:
             caption = format_caption(car)
-            photos = car["photos"]
-
-            if photos:
-                media = []
-                for i, photo in enumerate(photos):
-                    if i == 0:
-                        media.append(InputMediaPhoto(media=photo, caption=caption, parse_mode=ParseMode.HTML))
-                    else:
-                        media.append(InputMediaPhoto(media=photo))
-                bot.send_media_group(chat_id=CHAT_ID, media=media)
-            else:
-                bot.send_message(chat_id=CHAT_ID, text=caption, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
-
+            media = []
+            for i, data in enumerate(car["photos"]):
+                bio = io.BytesIO(data)
+                bio.name = f"photo{i}.jpg"
+                if i == 0:
+                    media.append(InputMediaPhoto(bio, caption=caption, parse_mode=ParseMode.HTML))
+                else:
+                    media.append(InputMediaPhoto(bio))
+            bot.send_media_group(chat_id=CHAT_ID, media=media, timeout=120)
             posted.add(car["id"])
-            print(f"Опубликовано: {car['title']}")
+            print(f"Опубликовано: {car['title']}", flush=True)
             time.sleep(3)
         except Exception as e:
-            print(f"Ошибка публикации {car['title']}: {e}")
+            print(f"Ошибка публикации {car['title']}: {e}", flush=True)
 
     save_posted(posted)
-    print("Готово!")
+    print("Готово!", flush=True)
 
 if __name__ == "__main__":
     main()
