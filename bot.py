@@ -13,28 +13,25 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+YANDEX_TOKEN = os.getenv("YANDEX_TOKEN", "").strip()          # тот же токен, что и в Instagram-боте
+YANDEX_QUEUE_FOLDER = os.getenv("YANDEX_QUEUE_FOLDER", "disk:/instagram_queue")
+
 POSTED_FILE = "posted_cars.json"
-PENDING_IG_FILE = "pending_ig_posts.json"          # очередь для Instagram
-PENDING_MEDIA_DIR = "pending_media"                # папка с фото для Instagram
 CARS_PER_DAY = 8
 MAX_PHOTOS = 10
-MAX_CHECK = 40  # сколько машин проверять за запуск
+MAX_CHECK = 40
 
-# --- фильтры каталога на сайте: год регистрации от 2022, до 160 л.с. ---
 CATALOG_FILTER = "year=2022-&preferential=1"
-
-# --- город доставки: берём со страницы машины, если не нашли - по стране ---
 CITY_BY_MARKET = {"china": "Уссурийска", "korea": "Владивостока"}
 KNOWN_CITIES = {
     "уссурийска": "Уссурийска", "уссурийск": "Уссурийска",
     "владивостока": "Владивостока", "владивосток": "Владивостока",
 }
 
-# --- сторис ---
 GROUP_USERNAME = "ASIAMOTORS_ROSTOV"
 BRAND = "ASIA MOTORS · РОСТОВ"
 STORIES_PER_DAY = 3
-BC_PREFIX = "bc:"  # так бот хранит id бизнес-подключения внутри posted_cars.json
+BC_PREFIX = "bc:"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 HEADERS = {"User-Agent": UA, "Referer": "https://asia-partner.ru/"}
@@ -62,46 +59,119 @@ def save_posted(posted):
         json.dump(list(posted), f, ensure_ascii=False, indent=2)
 
 
-def add_to_instagram_queue(images: list, caption: str, unique_id: str):
-    """
-    Добавляет пост в очередь для Instagram-скрипта.
-    images — список локальных путей к фото
-    caption — текст (лучше без HTML)
-    unique_id — уникальный id машины
-    """
-    posts = []
-    if os.path.exists(PENDING_IG_FILE):
-        try:
-            with open(PENDING_IG_FILE, "r", encoding="utf-8") as f:
-                posts = json.load(f)
-        except Exception:
-            posts = []
-
-    # Не добавляем дубликат
-    if any(p.get("id") == str(unique_id) for p in posts):
-        print(f"  уже есть в очереди Instagram: {unique_id}", flush=True)
-        return
-
-    posts.append({
-        "id": str(unique_id),
-        "images": images,
-        "caption": caption,
-        "title": caption.split("\n")[0] if caption else "Автомобиль в наличии"
-    })
-
-    with open(PENDING_IG_FILE, "w", encoding="utf-8") as f:
-        json.dump(posts, f, ensure_ascii=False, indent=2)
-
-    print(f"  ✅ Добавлено в очередь Instagram: {unique_id} ({len(images)} фото)", flush=True)
-
-
 def strip_html(html_text: str) -> str:
-    """Убирает HTML-теги для Instagram"""
     text = re.sub(r"<br\s*/?>", "\n", html_text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
     text = htmllib.unescape(text)
     return text.strip()
 
+
+# ======================= ЯНДЕКС.ДИСК =======================
+
+def yandex_headers():
+    return {"Authorization": f"OAuth {YANDEX_TOKEN}"}
+
+
+def yandex_create_folder(path: str) -> bool:
+    """Создаёт папку на Яндекс.Диске (если уже есть — ок)"""
+    if not YANDEX_TOKEN:
+        return False
+    try:
+        r = requests.put(
+            "https://cloud-api.yandex.net/v1/disk/resources",
+            params={"path": path},
+            headers=yandex_headers(),
+            timeout=30
+        )
+        # 201 = создана, 409 = уже существует
+        return r.status_code in (201, 409)
+    except Exception as e:
+        print(f"  Ошибка создания папки {path}: {e}", flush=True)
+        return False
+
+
+def yandex_upload_bytes(data: bytes, remote_path: str) -> bool:
+    """Загружает байты на Яндекс.Диск"""
+    if not YANDEX_TOKEN:
+        return False
+    try:
+        # Получаем URL для загрузки
+        r = requests.get(
+            "https://cloud-api.yandex.net/v1/disk/resources/upload",
+            params={"path": remote_path, "overwrite": "true"},
+            headers=yandex_headers(),
+            timeout=30
+        )
+        if not r.ok:
+            print(f"  Не удалось получить URL загрузки: {r.text}", flush=True)
+            return False
+        upload_url = r.json().get("href")
+        if not upload_url:
+            return False
+
+        # Загружаем
+        res = requests.put(upload_url, data=data, timeout=120)
+        return res.status_code in (201, 202)
+    except Exception as e:
+        print(f"  Ошибка загрузки на Яндекс {remote_path}: {e}", flush=True)
+        return False
+
+
+def upload_car_to_yandex_queue(car: dict, plain_caption: str) -> bool:
+    """
+    Загружает машину в очередь Instagram на Яндекс.Диск.
+    Структура:
+      disk:/instagram_queue/{car_id}/
+        meta.json
+        0.jpg
+        1.jpg
+        ...
+    """
+    if not YANDEX_TOKEN:
+        print("  YANDEX_TOKEN не задан — пропускаю очередь Instagram", flush=True)
+        return False
+
+    car_id = str(car["id"])
+    folder = f"{YANDEX_QUEUE_FOLDER.rstrip('/')}/{car_id}"
+
+    # Создаём корневую папку очереди и папку машины
+    yandex_create_folder(YANDEX_QUEUE_FOLDER)
+    yandex_create_folder(folder)
+
+    # Загружаем фото
+    photo_names = []
+    for i, data in enumerate(car["photos"]):
+        name = f"{i}.jpg"
+        remote = f"{folder}/{name}"
+        if yandex_upload_bytes(data, remote):
+            photo_names.append(name)
+            print(f"  загружено фото {name}", flush=True)
+        else:
+            print(f"  не удалось загрузить фото {name}", flush=True)
+
+    if not photo_names:
+        print("  Нет загруженных фото — пропускаю", flush=True)
+        return False
+
+    # meta.json
+    meta = {
+        "id": car_id,
+        "title": car.get("title", ""),
+        "caption": plain_caption,
+        "photos": photo_names,
+        "market": car.get("market", ""),
+        "price": car.get("price", ""),
+    }
+    meta_bytes = json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8")
+    if yandex_upload_bytes(meta_bytes, f"{folder}/meta.json"):
+        print(f"  ✅ Машина {car_id} добавлена в очередь Instagram на Яндекс.Диск", flush=True)
+        return True
+    else:
+        print(f"  Не удалось загрузить meta.json для {car_id}", flush=True)
+        return False
+
+
+# ======================= ПАРСИНГ =======================
 
 def fetch_links(url, market):
     r = requests.get(url, headers=HEADERS, timeout=20)
@@ -137,7 +207,6 @@ def get_car_links(market="china", pages=3):
 
 
 def unwrap(u):
-    """asia-partner.ru/img?src=<настоящий адрес> -> настоящий адрес"""
     if "/img?" in u and "src=" in u:
         try:
             q = parse_qs(urlparse(u).query)
@@ -241,7 +310,6 @@ def download_image(u):
 
 
 def parse_specs(text):
-    """Читает блок 'Характеристики': строка-название, следующая строка-значение."""
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     start = 0
     for i, l in enumerate(lines):
@@ -260,7 +328,6 @@ def parse_specs(text):
 
 
 def detect_city(text, market):
-    """Город доставки: ищем на странице 'под ключ до <город>', иначе по стране."""
     m = re.search(r"под\s*ключ\s*до\s+([А-Яа-яЁё]+)", text, re.IGNORECASE)
     if m:
         city = KNOWN_CITIES.get(m.group(1).lower())
@@ -286,12 +353,11 @@ def parse_car(url):
         price = ""
         price_match = re.search(r"(\d[\d\s]{4,})\s*₽", text)
         if price_match:
-            digits = re.sub(r"\D", "", price_match.group(1))  # убираем все пробелы, в т.ч. неразрывные
+            digits = re.sub(r"\D", "", price_match.group(1))
             if digits:
                 price = f"{int(digits):,}".replace(",", " ") + " ₽"
 
         city = detect_city(text, market)
-
         specs = parse_specs(text)
 
         if "Год выпуска" not in specs:
@@ -485,7 +551,6 @@ def wrap_text(draw, text, font, max_w, max_lines):
 
 
 def make_story_image(car):
-    """Возвращает (jpeg-байты, позиция кнопки для ссылки) или None."""
     imgs = []
     for data in car["photos"][:3]:
         try:
@@ -510,7 +575,6 @@ def make_story_image(car):
     hero_h = 738 if extra else 1080
     paste_rounded(canvas, fit_cover(hero, card_w, hero_h), (M, hero_y), 36)
 
-    # плашка страны на главном фото
     is_korea = car.get("market") == "korea"
     label = "КОРЕЯ" if is_korea else "КИТАЙ"
     color = (0, 71, 160) if is_korea else (215, 38, 24)
@@ -523,7 +587,6 @@ def make_story_image(car):
 
     y = hero_y + hero_h + 28
 
-    # две маленькие фотографии с других ракурсов
     if extra:
         th = 260
         if len(extra) == 1:
@@ -534,20 +597,17 @@ def make_story_image(car):
                 paste_rounded(canvas, fit_cover(im, tw2, th), (M + i * (tw2 + 24), y), 28)
         y += th + 28
 
-    # название
     f_title = load_font(FONT_BOLD, 64)
     for line in wrap_text(draw, car["title"], f_title, card_w, 2):
         draw.text((M, y), line, font=f_title, fill=(255, 255, 255))
         y += 76
 
-    # год · пробег · мощность
     s = car["specs"]
     spec_line = " · ".join(x for x in [s.get("Год выпуска"), s.get("Пробег"), s.get("Мощность")] if x)
     if spec_line:
         draw.text((M, y + 2), spec_line, font=load_font(FONT_REG, 38), fill=(225, 225, 225))
         y += 60
 
-    # цена
     y += 10
     city_up = car.get("city", "Владивостока").upper()
     draw.text((M, y), f"ПОД КЛЮЧ ДО {city_up}", font=load_font(FONT_BOLD, 28), fill=(255, 196, 61))
@@ -560,7 +620,6 @@ def make_story_image(car):
     draw.text((M, y), car["price"], font=f_price, fill=(255, 255, 255))
     y += 104
 
-    # кнопка
     btn_h = 90
     by = y + 16
     draw.rounded_rectangle([M, by, M + card_w, by + btn_h], radius=45, fill=(255, 255, 255))
@@ -607,7 +666,7 @@ def post_story(conn_id, img_bytes, caption, area=None):
     attempts = []
     if area:
         attempts.append(dict(base, areas=json.dumps([area])))
-    attempts.append(base)  # запасной вариант: без кликабельной зоны, ссылка в подписи
+    attempts.append(base)
     for data in attempts:
         res = tg_call("postStory", data=data,
                       files={"story_photo": ("story.jpg", img_bytes, "image/jpeg")})
@@ -646,9 +705,6 @@ def main():
     bot = Bot(token=BOT_TOKEN)
     posted = load_posted()
     print(f"Уже опубликовано: {len(posted)} записей", flush=True)
-
-    # Создаём папку для фото Instagram
-    os.makedirs(PENDING_MEDIA_DIR, exist_ok=True)
 
     all_links = get_car_links("china", pages=4) + get_car_links("korea", pages=2)
     random.shuffle(all_links)
@@ -691,24 +747,13 @@ def main():
             published.append((car, mid))
             print(f"Опубликовано: {car['title']} (сообщение {mid})", flush=True)
 
-            # ========== ДОБАВЛЯЕМ В ОЧЕРЕДЬ INSTAGRAM ==========
+            # ========== ЗАГРУЖАЕМ В ОЧЕРЕДЬ INSTAGRAM НА ЯНДЕКС ==========
             try:
-                image_paths = []
-                for i, data in enumerate(car["photos"]):
-                    path = os.path.join(PENDING_MEDIA_DIR, f"{car['id']}_{i}.jpg")
-                    with open(path, "wb") as f:
-                        f.write(data)
-                    image_paths.append(path)
-
                 plain_caption = strip_html(caption_html)
-                add_to_instagram_queue(
-                    images=image_paths,
-                    caption=plain_caption,
-                    unique_id=car["id"]
-                )
+                upload_car_to_yandex_queue(car, plain_caption)
             except Exception as e:
-                print(f"  Ошибка добавления в очередь Instagram: {e}", flush=True)
-            # ==================================================
+                print(f"  Ошибка загрузки в очередь Instagram: {e}", flush=True)
+            # ============================================================
 
             time.sleep(3)
         except Exception as e:
