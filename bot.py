@@ -14,6 +14,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 POSTED_FILE = "posted_cars.json"
+PENDING_IG_FILE = "pending_ig_posts.json"          # очередь для Instagram
+PENDING_MEDIA_DIR = "pending_media"                # папка с фото для Instagram
 CARS_PER_DAY = 8
 MAX_PHOTOS = 10
 MAX_CHECK = 40  # сколько машин проверять за запуск
@@ -58,6 +60,47 @@ def load_posted():
 def save_posted(posted):
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
         json.dump(list(posted), f, ensure_ascii=False, indent=2)
+
+
+def add_to_instagram_queue(images: list, caption: str, unique_id: str):
+    """
+    Добавляет пост в очередь для Instagram-скрипта.
+    images — список локальных путей к фото
+    caption — текст (лучше без HTML)
+    unique_id — уникальный id машины
+    """
+    posts = []
+    if os.path.exists(PENDING_IG_FILE):
+        try:
+            with open(PENDING_IG_FILE, "r", encoding="utf-8") as f:
+                posts = json.load(f)
+        except Exception:
+            posts = []
+
+    # Не добавляем дубликат
+    if any(p.get("id") == str(unique_id) for p in posts):
+        print(f"  уже есть в очереди Instagram: {unique_id}", flush=True)
+        return
+
+    posts.append({
+        "id": str(unique_id),
+        "images": images,
+        "caption": caption,
+        "title": caption.split("\n")[0] if caption else "Автомобиль в наличии"
+    })
+
+    with open(PENDING_IG_FILE, "w", encoding="utf-8") as f:
+        json.dump(posts, f, ensure_ascii=False, indent=2)
+
+    print(f"  ✅ Добавлено в очередь Instagram: {unique_id} ({len(images)} фото)", flush=True)
+
+
+def strip_html(html_text: str) -> str:
+    """Убирает HTML-теги для Instagram"""
+    text = re.sub(r"<br\s*/?>", "\n", html_text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = htmllib.unescape(text)
+    return text.strip()
 
 
 def fetch_links(url, market):
@@ -604,6 +647,9 @@ def main():
     posted = load_posted()
     print(f"Уже опубликовано: {len(posted)} записей", flush=True)
 
+    # Создаём папку для фото Instagram
+    os.makedirs(PENDING_MEDIA_DIR, exist_ok=True)
+
     all_links = get_car_links("china", pages=4) + get_car_links("korea", pages=2)
     random.shuffle(all_links)
 
@@ -630,13 +676,13 @@ def main():
     published = []
     for car in to_post:
         try:
-            caption = build_caption(car)
+            caption_html = build_caption(car)
             media = []
             for i, data in enumerate(car["photos"]):
                 bio = io.BytesIO(data)
                 bio.name = f"photo{i}.jpg"
                 if i == 0:
-                    media.append(InputMediaPhoto(bio, caption=caption, parse_mode=ParseMode.HTML))
+                    media.append(InputMediaPhoto(bio, caption=caption_html, parse_mode=ParseMode.HTML))
                 else:
                     media.append(InputMediaPhoto(bio))
             msgs = bot.send_media_group(chat_id=CHAT_ID, media=media, timeout=120)
@@ -644,6 +690,26 @@ def main():
             posted.add(car["id"])
             published.append((car, mid))
             print(f"Опубликовано: {car['title']} (сообщение {mid})", flush=True)
+
+            # ========== ДОБАВЛЯЕМ В ОЧЕРЕДЬ INSTAGRAM ==========
+            try:
+                image_paths = []
+                for i, data in enumerate(car["photos"]):
+                    path = os.path.join(PENDING_MEDIA_DIR, f"{car['id']}_{i}.jpg")
+                    with open(path, "wb") as f:
+                        f.write(data)
+                    image_paths.append(path)
+
+                plain_caption = strip_html(caption_html)
+                add_to_instagram_queue(
+                    images=image_paths,
+                    caption=plain_caption,
+                    unique_id=car["id"]
+                )
+            except Exception as e:
+                print(f"  Ошибка добавления в очередь Instagram: {e}", flush=True)
+            # ==================================================
+
             time.sleep(3)
         except Exception as e:
             print(f"Ошибка публикации {car['title']}: {e}", flush=True)
@@ -686,6 +752,6 @@ def main():
     save_posted(posted)
     print("Готово!", flush=True)
 
+
 if __name__ == "__main__":
     main()
-
