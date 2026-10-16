@@ -18,6 +18,16 @@ CARS_PER_DAY = 8
 MAX_PHOTOS = 10
 MAX_CHECK = 40  # сколько машин проверять за запуск
 
+# --- фильтры каталога на сайте: год регистрации от 2022, до 160 л.с. ---
+CATALOG_FILTER = "year=2022-&preferential=1"
+
+# --- город доставки: берём со страницы машины, если не нашли - по стране ---
+CITY_BY_MARKET = {"china": "Уссурийска", "korea": "Владивостока"}
+KNOWN_CITIES = {
+    "уссурийска": "Уссурийска", "уссурийск": "Уссурийска",
+    "владивостока": "Владивостока", "владивосток": "Владивостока",
+}
+
 # --- сторис ---
 GROUP_USERNAME = "ASIAMOTORS_ROSTOV"
 BRAND = "ASIA MOTORS · РОСТОВ"
@@ -50,22 +60,36 @@ def save_posted(posted):
         json.dump(list(posted), f, ensure_ascii=False, indent=2)
 
 
+def fetch_links(url, market):
+    r = requests.get(url, headers=HEADERS, timeout=20)
+    found = re.findall(rf'cars/{market}/[a-z0-9\-]+-\d+', r.text)
+    return list(dict.fromkeys("https://asia-partner.ru/" + f for f in found))
+
+
 def get_car_links(market="china", pages=3):
     links = []
     base = f"https://asia-partner.ru/catalog/{market}"
+    use_filter = True
     for page in range(1, pages + 1):
-        url = base if page == 1 else f"{base}?page={page}"
+        if use_filter:
+            url = f"{base}?{CATALOG_FILTER}" + ("" if page == 1 else f"&page={page}")
+        else:
+            url = base if page == 1 else f"{base}?page={page}"
         try:
-            r = requests.get(url, headers=HEADERS, timeout=20)
-            found = re.findall(rf'cars/{market}/[a-z0-9\-]+-\d+', r.text)
-            for f in found:
-                full = "https://asia-partner.ru/" + f
-                if full not in links:
-                    links.append(full)
+            found = fetch_links(url, market)
+            if page == 1 and use_filter and not found:
+                print(f"  фильтр не сработал для {market}, беру каталог без фильтра", flush=True)
+                use_filter = False
+                found = fetch_links(base, market)
+            new = [l for l in found if l not in links]
+            print(f"  {market} стр {page}: найдено {len(found)}, новых {len(new)}", flush=True)
+            links += new
+            if not new:
+                break
             time.sleep(1)
         except Exception as e:
             print(f"Ошибка списка {market} стр {page}: {e}", flush=True)
-    print(f"Ссылок {market}: {len(links)}", flush=True)
+    print(f"Ссылок {market}: {len(links)} ({'с фильтром' if use_filter else 'без фильтра'})", flush=True)
     return links
 
 
@@ -192,6 +216,16 @@ def parse_specs(text):
     return specs
 
 
+def detect_city(text, market):
+    """Город доставки: ищем на странице 'под ключ до <город>', иначе по стране."""
+    m = re.search(r"под\s*ключ\s*до\s+([А-Яа-яЁё]+)", text, re.IGNORECASE)
+    if m:
+        city = KNOWN_CITIES.get(m.group(1).lower())
+        if city:
+            return city
+    return CITY_BY_MARKET.get(market, "Владивостока")
+
+
 def parse_car(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=25)
@@ -212,6 +246,8 @@ def parse_car(url):
             digits = re.sub(r"\D", "", price_match.group(1))  # убираем все пробелы, в т.ч. неразрывные
             if digits:
                 price = f"{int(digits):,}".replace(",", " ") + " ₽"
+
+        city = detect_city(text, market)
 
         specs = parse_specs(text)
 
@@ -244,7 +280,7 @@ def parse_car(url):
 
         photo_urls = extract_photos(soup, r.text)
         print(f"{url[:80]}", flush=True)
-        print(f"  название: {title[:40]!r}, цена: {price!r}, год: {year}, характеристик: {len(specs)}", flush=True)
+        print(f"  название: {title[:40]!r}, цена: {price!r}, до {city}, год: {year}, характеристик: {len(specs)}", flush=True)
         print(f"  найдено фото: {len(photo_urls)}", flush=True)
 
         if year and year < 2021:
@@ -273,7 +309,7 @@ def parse_car(url):
         return {
             "id": car_id, "url": url, "market": market, "title": title,
             "year": year, "hp": hp, "specs": specs, "price": price,
-            "photos": photos,
+            "city": city, "photos": photos,
             "is_prefer": hp is not None and hp <= 160,
         }
     except Exception as e:
@@ -324,7 +360,7 @@ def format_caption(car, full=True):
 
     lines.append("")
     lines.append(f"💰 <b>Под ключ: {esc(car['price'])}</b>")
-    lines.append("(до Владивостока)")
+    lines.append(f"(до {esc(car.get('city', 'Владивостока'))})")
     return "\n".join(lines)
 
 
@@ -470,7 +506,8 @@ def make_story_image(car):
 
     # цена
     y += 10
-    draw.text((M, y), "ПОД КЛЮЧ ДО ВЛАДИВОСТОКА", font=load_font(FONT_BOLD, 28), fill=(255, 196, 61))
+    city_up = car.get("city", "Владивостока").upper()
+    draw.text((M, y), f"ПОД КЛЮЧ ДО {city_up}", font=load_font(FONT_BOLD, 28), fill=(255, 196, 61))
     y += 40
     size = 90
     f_price = load_font(FONT_BOLD, size)
@@ -503,7 +540,7 @@ def make_story_image(car):
 def story_caption(car, link):
     flag = "🇰🇷" if car.get("market") == "korea" else "🇨🇳"
     return (f"{flag} <b>{esc(car['title'])}</b>\n"
-            f"💰 Под ключ до Владивостока: <b>{esc(car['price'])}</b>\n\n"
+            f"💰 Под ключ до {esc(car.get('city', 'Владивостока'))}: <b>{esc(car['price'])}</b>\n\n"
             f"👉 Подробности и фото в группе: {link}")
 
 
@@ -650,5 +687,5 @@ def main():
     print("Готово!", flush=True)
 
 
-if __name__ == "__main__":
+if __name__ == "__";
     main()
