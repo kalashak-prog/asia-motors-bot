@@ -687,5 +687,5 @@ def main():
     print("Готово!", flush=True)
 
 
-if __name__ == "__";
+if __name__ == "__main__":
     main()
