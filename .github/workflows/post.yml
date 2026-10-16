@@ -16,3 +16,4 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          YANDEX_TOKEN: ${{ secrets.YANDEX_TOKEN }}
