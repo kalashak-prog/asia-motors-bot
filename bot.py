@@ -17,7 +17,7 @@ YANDEX_TOKEN = os.getenv("YANDEX_TOKEN", "").strip()          # тот же то
 YANDEX_QUEUE_FOLDER = os.getenv("YANDEX_QUEUE_FOLDER", "disk:/instagram_queue")
 
 POSTED_FILE = "posted_cars.json"
-CARS_PER_DAY = 8
+CARS_PER_DAY = 5
 MAX_PHOTOS = 10
 MAX_CHECK = 40
 
@@ -30,7 +30,7 @@ KNOWN_CITIES = {
 
 GROUP_USERNAME = "ASIAMOTORS_ROSTOV"
 BRAND = "ASIA MOTORS · РОСТОВ"
-STORIES_PER_DAY = 3
+STORIES_PER_DAY = 2
 BC_PREFIX = "bc:"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
