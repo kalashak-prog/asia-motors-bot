@@ -387,13 +387,26 @@ def parse_car(url):
         if hm:
             hp = int(hm.group(1))
 
+        # Пробег в километрах
+        mileage = None
+        mileage_str = specs.get("Пробег", "")
+        mm = re.search(r"([\d\s]+)", mileage_str.replace(" ", " "))
+        if mm:
+            try:
+                mileage = int(re.sub(r"\D", "", mm.group(1)))
+            except Exception:
+                mileage = None
+
         photo_urls = extract_photos(soup, r.text)
         print(f"{url[:80]}", flush=True)
-        print(f"  название: {title[:40]!r}, цена: {price!r}, до {city}, год: {year}, характеристик: {len(specs)}", flush=True)
+        print(f"  название: {title[:40]!r}, цена: {price!r}, до {city}, год: {year}, пробег: {mileage}, характеристик: {len(specs)}", flush=True)
         print(f"  найдено фото: {len(photo_urls)}", flush=True)
 
         if year and year < 2021:
             print("  пропуск: старше 2021", flush=True)
+            return None
+        if mileage is not None and mileage > 80000:
+            print(f"  пропуск: пробег {mileage} км > 80 000", flush=True)
             return None
         if not title or not price:
             print("  пропуск: нет названия или цены", flush=True)
