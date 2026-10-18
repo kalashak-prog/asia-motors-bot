@@ -241,7 +241,7 @@ def extract_photos(soup, html):
 
     clean = []
     for u in urls:
-        u = u.replace("\\/", "/").replace("&amp;", "&").replace("\\u0026", "&")
+        u = u.replace("\\/", "/").replace("&", "&").replace("\\u0026", "&")
         if u.startswith("//"):
             u = "https:" + u
         elif u.startswith("/"):
@@ -507,18 +507,18 @@ FONT_REG = [
     "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
     "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
 ]
+
 _font_warned = False
 
-
-def load_font(paths, size):
+def load_font(candidates, size):
     global _font_warned
-    for p in paths:
+    for path in candidates:
         try:
-            return ImageFont.truetype(p, size)
+            return ImageFont.truetype(path, size)
         except Exception:
             continue
     if not _font_warned:
-        print("  ВНИМАНИЕ: не найден шрифт с кириллицей, текст на сторис может быть кривым", flush=True)
+        print("  шрифт не найден, текст может быть кривым", flush=True)
         _font_warned = True
     try:
         return ImageFont.load_default(size)
@@ -662,10 +662,18 @@ def story_caption(car, link):
 def tg_call(method, data=None, files=None):
     try:
         r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
-                          data=data, files=files, timeout=120)
+                          data=data, files=files, timeout=60)
         return r.json()
     except Exception as e:
-        return {"ok": False, "description": str(e)}
+        print(f"tg_call {method}: {e}", flush=True)
+        return {}
+
+
+def find_business_connection():
+    res = tg_call("getBusinessConnection")
+    if res.get("ok") and res.get("result"):
+        return res["result"].get("id")
+    return None
 
 
 def post_story(conn_id, img_bytes, caption, area=None):
@@ -685,30 +693,9 @@ def post_story(conn_id, img_bytes, caption, area=None):
                       files={"story_photo": ("story.jpg", img_bytes, "image/jpeg")})
         if res.get("ok"):
             return True
-        print(f"  postStory ошибка: {res.get('description')}", flush=True)
+        print(f"  postStory fail: {res}", flush=True)
     return False
 
-
-def find_business_connection():
-    try:
-        r = requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-            params={"allowed_updates": json.dumps(["business_connection"]), "timeout": 0},
-            timeout=30)
-        res = r.json()
-        for upd in reversed(res.get("result", [])):
-            bc = upd.get("business_connection")
-            if bc and bc.get("is_enabled", True) and bc.get("id"):
-                print(f"Найдено бизнес-подключение: {bc['id']}", flush=True)
-                return bc["id"]
-        if not res.get("ok"):
-            print(f"getUpdates: {res.get('description')}", flush=True)
-    except Exception as e:
-        print(f"Ошибка поиска подключения: {e}", flush=True)
-    return None
-
-
-# ======================= ГЛАВНАЯ ЧАСТЬ =======================
 
 def main():
     if not BOT_TOKEN or not CHAT_ID:
@@ -738,9 +725,40 @@ def main():
                 break
         time.sleep(1.5)
 
+    # Избегаем двух машин одной марки подряд
+    def get_brand(car):
+        title = (car.get("title") or "").strip()
+        if not title:
+            return ""
+        # Берём первое слово (обычно марка: Toyota, Hyundai, Geely...)
+        brand = title.split()[0].upper()
+        # Убираем лишние символы
+        brand = re.sub(r"[^A-ZА-ЯЁ0-9]", "", brand)
+        return brand
+
     candidates.sort(key=lambda x: (not x["is_prefer"], random.random()))
-    to_post = candidates[:CARS_PER_DAY]
-    print(f"Проверено: {checked}, годных: {len(candidates)}, публикуем: {len(to_post)}", flush=True)
+
+    to_post = []
+    used_brands = set()
+    for car in candidates:
+        brand = get_brand(car)
+        if brand and brand in used_brands:
+            continue
+        to_post.append(car)
+        if brand:
+            used_brands.add(brand)
+        if len(to_post) >= CARS_PER_DAY:
+            break
+
+    # Если не набрали достаточно из-за фильтра марок — добираем оставшимися
+    if len(to_post) < CARS_PER_DAY:
+        for car in candidates:
+            if car not in to_post:
+                to_post.append(car)
+                if len(to_post) >= CARS_PER_DAY:
+                    break
+
+    print(f"Проверено: {checked}, годных: {len(candidates)}, публикуем: {len(to_post)} (без повторов марок)", flush=True)
 
     published = []
     for car in to_post:
