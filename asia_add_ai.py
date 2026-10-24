@@ -7,7 +7,14 @@ import ast
 p = Path("bot.py")
 c = p.read_text(encoding="utf-8")
 
-if "Подбор авто с ИИ-помощником" in c and "Бот в Telegram: @ASIAMOTORS_ROSTOV" in c:
+# Upgrade old username if already patched
+if "Бот в Telegram: @ASIAMOTORS_ROSTOV" in c:
+    c = c.replace("Бот в Telegram: @ASIAMOTORS_ROSTOV", "Бот в Telegram: @AsiaMotorsRostovBot")
+    p.write_text(c, encoding="utf-8")
+    print("OK: username updated to @AsiaMotorsRostovBot")
+    raise SystemExit(0)
+
+if "Подбор авто с ИИ-помощником" in c and "Бот в Telegram: @AsiaMotorsRostovBot" in c:
     print("already polished")
     raise SystemExit(0)
 
@@ -28,7 +35,7 @@ block = (
     '        "(марка, год, пробег, бюджет) — "\n'
     '        "помощник подберёт подходящий вариант."\n'
     "    )\n"
-    '    lines.append("Бот в Telegram: @ASIAMOTORS_ROSTOV")\n'
+    '    lines.append("Бот в Telegram: @AsiaMotorsRostovBot")\n'
 )
 
 pat = re.compile(
