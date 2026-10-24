@@ -20,6 +20,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Add AI assistant footer to captions
+        run: python3 asia_add_ai.py
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
