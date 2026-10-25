@@ -639,14 +639,6 @@ def make_story_image(car):
     draw.text((W // 2, by + btn_h // 2), "Смотреть в группе  →",
               font=load_font(FONT_BOLD, 40), fill=(20, 20, 20), anchor="mm")
 
-    position = {
-        "x_percentage": 50.0,
-        "y_percentage": round((by + btn_h / 2) / H * 100, 2),
-        "width_percentage": round(card_w / W * 100, 2),
-        "height_percentage": round(btn_h / H * 100, 2),
-        "rotation_angle": 0.0,
-    }
-
     buf = io.BytesIO()
     canvas.save(buf, "JPEG", quality=90, optimize=True)
     return buf.getvalue()
