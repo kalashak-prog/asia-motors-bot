@@ -20,6 +20,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Fix Telegram Stories API fields
+        run: python3 fix_stories_only.py
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -32,6 +35,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          YANDEX_TOKEN: ${{ secrets.YANDEX_TOKEN }}
           BUSINESS_CONNECTION_ID: ${{ secrets.BUSINESS_CONNECTION_ID }}
         run: python bot.py
 
