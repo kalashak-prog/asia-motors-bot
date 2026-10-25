@@ -36,6 +36,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           YANDEX_TOKEN: ${{ secrets.YANDEX_TOKEN }}
+          BUSINESS_CONNECTION_ID: ${{ secrets.BUSINESS_CONNECTION_ID }}
         run: python bot.py
 
       - name: Commit updated posted cars
