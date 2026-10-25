@@ -2,7 +2,6 @@
 """Fix Telegram Stories only. Yandex Disk logic is left untouched."""
 from pathlib import Path
 import ast
-import re
 
 p = Path("bot.py")
 c = p.read_text(encoding="utf-8")
@@ -35,48 +34,49 @@ if "corner_radius_percentage" not in c:
 else:
     print("OK: corner_radius already present")
 
-# --- post_story with 3 attempts ---
-m = re.search(r"def post_story\(.*?
-(?=def main)", c, re.S)
-if not m:
-    raise SystemExit("post_story not found")
+# --- replace post_story ---
+start = c.find("def post_story(")
+end = c.find("\ndef main")
+if start < 0 or end < 0:
+    raise SystemExit("post_story / main markers not found")
 
-new_post = '''def post_story(conn_id, img_bytes, caption, area=None):
-    content = json.dumps({"type": "photo", "photo": "attach://story_photo"})
-    files = {"story_photo": ("story.jpg", img_bytes, "image/jpeg")}
-    attempts = []
-    if area:
-        attempts.append({
-            "business_connection_id": conn_id,
-            "content": content,
-            "active_period": 86400,
-            "caption": caption,
-            "parse_mode": "HTML",
-            "areas": json.dumps([area]),
-        })
-    attempts.append({
-        "business_connection_id": conn_id,
-        "content": content,
-        "active_period": 86400,
-        "caption": caption,
-        "parse_mode": "HTML",
-    })
-    attempts.append({
-        "business_connection_id": conn_id,
-        "content": content,
-        "active_period": 86400,
-    })
-    for i, data in enumerate(attempts, 1):
-        res = tg_call("postStory", data=data, files=files)
-        if res.get("ok"):
-            print(f"  postStory OK (попытка {i})", flush=True)
-            return True
-        print(f"  postStory fail (попытка {i}): {res.get('description', res)}", flush=True)
-    return False
-
-
-'''
-c = c[: m.start()] + new_post + c[m.end() :]
+new_post = (
+    "def post_story(conn_id, img_bytes, caption, area=None):\n"
+    '    content = json.dumps({"type": "photo", "photo": "attach://story_photo"})\n'
+    '    files = {"story_photo": ("story.jpg", img_bytes, "image/jpeg")}\n'
+    "    attempts = []\n"
+    "    if area:\n"
+    "        attempts.append({\n"
+    '            "business_connection_id": conn_id,\n'
+    '            "content": content,\n'
+    '            "active_period": 86400,\n'
+    '            "caption": caption,\n'
+    '            "parse_mode": "HTML",\n'
+    '            "areas": json.dumps([area]),\n'
+    "        })\n"
+    "    attempts.append({\n"
+    '        "business_connection_id": conn_id,\n'
+    '        "content": content,\n'
+    '        "active_period": 86400,\n'
+    '        "caption": caption,\n'
+    '        "parse_mode": "HTML",\n'
+    "    })\n"
+    "    attempts.append({\n"
+    '        "business_connection_id": conn_id,\n'
+    '        "content": content,\n'
+    '        "active_period": 86400,\n'
+    "    })\n"
+    "    for i, data in enumerate(attempts, 1):\n"
+    '        res = tg_call("postStory", data=data, files=files)\n'
+    '        if res.get("ok"):\n'
+    '            print(f"  postStory OK (попытка {i})", flush=True)\n'
+    "            return True\n"
+    '        print(f"  postStory fail (попытка {i}): {res.get(\'description\', res)}", flush=True)\n'
+    "    return False\n"
+    "\n"
+    "\n"
+)
+c = c[:start] + new_post + c[end + 1 :]
 print("OK: post_story retries")
 
 # --- story loop ---
