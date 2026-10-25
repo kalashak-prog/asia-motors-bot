@@ -23,6 +23,9 @@ jobs:
       - name: Restore full bot.py
         run: python3 assemble_bot.py
 
+      - name: Fix StoryArea API fields
+        run: python3 fix_story_area.py
+
       - name: Add AI assistant footer to captions
         run: python3 asia_add_ai.py
 
