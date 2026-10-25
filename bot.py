@@ -827,7 +827,7 @@ def main():
                 img = make_story_image(car)
                 if not img:
                     continue
-                if post_story(conn_id, img, story_caption(car, link))
+                if post_story(conn_id, img, story_caption(car, link)):
                     done += 1
                     print(f"Сторис опубликована: {car['title']}", flush=True)
                 time.sleep(3)
