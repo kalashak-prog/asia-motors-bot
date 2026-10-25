@@ -20,9 +20,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fix Telegram Stories API fields
-        run: python3 fix_stories_only.py
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -44,4 +41,4 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add posted_cars.json || true
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update posted_cars.json" && git push) || true
+          git diff --staged --quiet || (git commit -m "Update posted_cars.json" && git pull --rebase && git push) || true
