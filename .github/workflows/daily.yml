@@ -20,7 +20,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Restore full bot.py (stories design)
+      - name: Restore full bot.py
         run: python3 assemble_bot.py
 
       - name: Add AI assistant footer to captions
@@ -38,7 +38,6 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-          YANDEX_TOKEN: ${{ secrets.YANDEX_TOKEN }}
           BUSINESS_CONNECTION_ID: ${{ secrets.BUSINESS_CONNECTION_ID }}
         run: python bot.py
 
