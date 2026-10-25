@@ -40,42 +40,41 @@ end = c.find("\ndef main")
 if start < 0 or end < 0:
     raise SystemExit("post_story / main markers not found")
 
-new_post = (
-    "def post_story(conn_id, img_bytes, caption, area=None):\n"
-    '    content = json.dumps({"type": "photo", "photo": "attach://story_photo"})\n'
-    '    files = {"story_photo": ("story.jpg", img_bytes, "image/jpeg")}\n'
-    "    attempts = []\n"
-    "    if area:\n"
-    "        attempts.append({\n"
-    '            "business_connection_id": conn_id,\n'
-    '            "content": content,\n'
-    '            "active_period": 86400,\n'
-    '            "caption": caption,\n'
-    '            "parse_mode": "HTML",\n'
-    '            "areas": json.dumps([area]),\n'
-    "        })\n"
-    "    attempts.append({\n"
-    '        "business_connection_id": conn_id,\n'
-    '        "content": content,\n'
-    '        "active_period": 86400,\n'
-    '        "caption": caption,\n'
-    '        "parse_mode": "HTML",\n'
-    "    })\n"
-    "    attempts.append({\n"
-    '        "business_connection_id": conn_id,\n'
-    '        "content": content,\n'
-    '        "active_period": 86400,\n'
-    "    })\n"
-    "    for i, data in enumerate(attempts, 1):\n"
-    '        res = tg_call("postStory", data=data, files=files)\n'
-    '        if res.get("ok"):\n'
-    '            print(f"  postStory OK (попытка {i})", flush=True)\n'
-    "            return True\n"
-    '        print(f"  postStory fail (попытка {i}): {res.get(\'description\', res)}", flush=True)\n'
-    "    return False\n"
-    "\n"
-    "\n"
-)
+new_post = r'''def post_story(conn_id, img_bytes, caption, area=None):
+    content = json.dumps({"type": "photo", "photo": "attach://story_photo"})
+    files = {"story_photo": ("story.jpg", img_bytes, "image/jpeg")}
+    attempts = []
+    if area:
+        attempts.append({
+            "business_connection_id": conn_id,
+            "content": content,
+            "active_period": 86400,
+            "caption": caption,
+            "parse_mode": "HTML",
+            "areas": json.dumps([area]),
+        })
+    attempts.append({
+        "business_connection_id": conn_id,
+        "content": content,
+        "active_period": 86400,
+        "caption": caption,
+        "parse_mode": "HTML",
+    })
+    attempts.append({
+        "business_connection_id": conn_id,
+        "content": content,
+        "active_period": 86400,
+    })
+    for i, data in enumerate(attempts, 1):
+        res = tg_call("postStory", data=data, files=files)
+        if res.get("ok"):
+            print(f"  postStory OK (попытка {i})", flush=True)
+            return True
+        print(f"  postStory fail (попытка {i}): {res.get('description', res)}", flush=True)
+    return False
+
+
+'''
 c = c[:start] + new_post + c[end + 1 :]
 print("OK: post_story retries")
 
@@ -96,35 +95,39 @@ old_loop = (
     '            print(f"Сторис выложено: {done}", flush=True)\n'
 )
 
-new_loop = (
-    "            done = 0\n"
-    "            for car, mid in published:\n"
-    "                if done >= STORIES_PER_DAY:\n"
-    "                    break\n"
-    '                link = f"https://t.me/{GROUP_USERNAME}/{mid}" if mid else f"https://t.me/{GROUP_USERNAME}"\n'
-    '                print(f"Сторис: готовлю {car.get(\'title\', \'?")[:50]}…", flush=True)\n'
-    "                built = make_story_image(car)\n"
-    "                if not built:\n"
-    '                    print("  пропуск: нет картинки", flush=True)\n'
-    "                    continue\n"
-    "                if isinstance(built, tuple):\n"
-    "                    img, position = built\n"
-    "                else:\n"
-    "                    img = built\n"
-    "                    position = {\n"
-    '                        "x_percentage": 50.0, "y_percentage": 85.0,\n'
-    '                        "width_percentage": 90.0, "height_percentage": 6.0,\n'
-    '                        "rotation_angle": 0.0, "corner_radius_percentage": 5.0,\n'
-    "                    }\n"
-    '                area = {"position": position, "type": {"type": "link", "url": link}}\n'
-    "                if post_story(conn_id, img, story_caption(car, link), area):\n"
-    "                    done += 1\n"
-    '                    print(f"Сторис опубликована ({done}/{STORIES_PER_DAY}): {car[\'title\']}", flush=True)\n'
-    "                else:\n"
-    '                    print(f"  не удалось: {car.get(\'title\', \'?")[:40]}", flush=True)\n'
-    "                time.sleep(5)\n"
-    '            print(f"Сторис выложено: {done} из {STORIES_PER_DAY}", flush=True)\n'
-)
+new_loop = r'''            done = 0
+            for car, mid in published:
+                if done >= STORIES_PER_DAY:
+                    break
+                link = f"https://t.me/{GROUP_USERNAME}/{mid}" if mid else f"https://t.me/{GROUP_USERNAME}"
+                title_short = (car.get("title") or "?")[:50]
+                print(f"Сторис: готовлю {title_short}…", flush=True)
+                built = make_story_image(car)
+                if not built:
+                    print("  пропуск: нет картинки", flush=True)
+                    continue
+                if isinstance(built, tuple):
+                    img, position = built
+                else:
+                    img = built
+                    position = {
+                        "x_percentage": 50.0,
+                        "y_percentage": 85.0,
+                        "width_percentage": 90.0,
+                        "height_percentage": 6.0,
+                        "rotation_angle": 0.0,
+                        "corner_radius_percentage": 5.0,
+                    }
+                area = {"position": position, "type": {"type": "link", "url": link}}
+                if post_story(conn_id, img, story_caption(car, link), area):
+                    done += 1
+                    print(f"Сторис опубликована ({done}/{STORIES_PER_DAY}): {car['title']}", flush=True)
+                else:
+                    fail_title = (car.get("title") or "?")[:40]
+                    print(f"  не удалось: {fail_title}", flush=True)
+                time.sleep(5)
+            print(f"Сторис выложено: {done} из {STORIES_PER_DAY}", flush=True)
+'''
 
 if old_loop not in c:
     raise SystemExit("story loop not found")
