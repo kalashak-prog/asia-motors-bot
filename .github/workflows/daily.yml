@@ -20,6 +20,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Restore full bot.py (stories design)
+        run: python3 assemble_bot.py
+
       - name: Add AI assistant footer to captions
         run: python3 asia_add_ai.py
 
