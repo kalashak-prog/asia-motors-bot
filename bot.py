@@ -661,18 +661,27 @@ def story_caption(car, link):
 
 def tg_call(method, data=None, files=None):
     try:
+        # Story uploads can take longer than ordinary Bot API requests.
         r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
-                          data=data, files=files, timeout=60)
-        return r.json()
+                          data=data, files=files, timeout=120)
+        try:
+            result = r.json()
+        except Exception:
+            result = {"ok": False, "description": f"HTTP {r.status_code}: {r.text[:500]}"}
+        if not result.get("ok"):
+            print(f"  Telegram API {method}: HTTP {r.status_code}; {result}", flush=True)
+        return result
     except Exception as e:
-        print(f"tg_call {method}: {e}", flush=True)
-        return {}
+        print(f"tg_call {method}: {type(e).__name__}: {e}", flush=True)
+        return {"ok": False, "description": f"{type(e).__name__}: {e}"}
 
 
 def find_business_connection():
-    res = tg_call("getBusinessConnection")
-    if res.get("ok") and res.get("result"):
-        return res["result"].get("id")
+    # Telegram Bot API requires a specific business_connection_id for getBusinessConnection.
+    # The ID is normally saved from an incoming business_connection update or supplied as a secret.
+    configured = os.getenv("BUSINESS_CONNECTION_ID", "").strip()
+    if configured:
+        return configured
     return None
 
 
@@ -684,16 +693,33 @@ def post_story(conn_id, img_bytes, caption, area=None):
         "caption": caption,
         "parse_mode": "HTML",
     }
-    attempts = []
+
+    # Try the simple story first: a malformed/unsupported clickable area must not block
+    # publishing the actual story. Then try the linked version as a fallback.
+    attempts = [("без области-ссылки", dict(base))]
     if area:
-        attempts.append(dict(base, areas=json.dumps([area])))
-    attempts.append(base)
-    for data in attempts:
+        attempts.append(("со ссылкой на группу", dict(base, areas=json.dumps([area]))))
+
+    for label, data in attempts:
         res = tg_call("postStory", data=data,
                       files={"story_photo": ("story.jpg", img_bytes, "image/jpeg")})
         if res.get("ok"):
+            print(f"  Telegram Story: успешно опубликована ({label})", flush=True)
             return True
-        print(f"  postStory fail: {res}", flush=True)
+        print(f"  Telegram Story: попытка {label} не удалась: {res.get('description', res)}", flush=True)
+
+    # Final compatibility attempt: omit caption/parse_mode in case the API rejects caption metadata.
+    minimal = {
+        "business_connection_id": conn_id,
+        "content": json.dumps({"type": "photo", "photo": "attach://story_photo"}),
+        "active_period": 86400,
+    }
+    res = tg_call("postStory", data=minimal,
+                  files={"story_photo": ("story.jpg", img_bytes, "image/jpeg")})
+    if res.get("ok"):
+        print("  Telegram Story: опубликована без подписи (резервная попытка)", flush=True)
+        return True
+    print(f"  Telegram Story: все попытки не удались: {res.get('description', res)}", flush=True)
     return False
 
 
