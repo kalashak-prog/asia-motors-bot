@@ -20,15 +20,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Restore full bot.py
-        run: python3 assemble_bot.py
-
-      - name: Fix StoryArea API fields
-        run: python3 fix_story_area.py
-
-      - name: Add AI assistant footer to captions
-        run: python3 asia_add_ai.py
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -41,7 +32,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-          BUSINESS_CONNECTION_ID: ${{ secrets.BUSINESS_CONNECTION_ID }}
+          YANDEX_TOKEN: ${{ secrets.YANDEX_TOKEN }}
         run: python bot.py
 
       - name: Commit updated posted cars
