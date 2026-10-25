@@ -649,7 +649,7 @@ def make_story_image(car):
 
     buf = io.BytesIO()
     canvas.save(buf, "JPEG", quality=90, optimize=True)
-    return buf.getvalue(), position
+    return buf.getvalue()
 
 
 def story_caption(car, link):
@@ -685,7 +685,7 @@ def find_business_connection():
     return None
 
 
-def post_story(conn_id, img_bytes, caption, area=None):
+def post_story(conn_id, img_bytes, caption):
     base = {
         "business_connection_id": conn_id,
         "content": json.dumps({"type": "photo", "photo": "attach://story_photo"}),
@@ -694,20 +694,14 @@ def post_story(conn_id, img_bytes, caption, area=None):
         "parse_mode": "HTML",
     }
 
-    # Try the simple story first: a malformed/unsupported clickable area must not block
-    # publishing the actual story. Then try the linked version as a fallback.
-    attempts = [("без области-ссылки", dict(base))]
-    if area:
-        attempts.append(("со ссылкой на группу", dict(base, areas=json.dumps([area]))))
-
-    for label, data in attempts:
-        res = tg_call("postStory", data=data,
-                      files={"story_photo": ("story.jpg", img_bytes, "image/jpeg")})
-        if res.get("ok"):
-            print(f"  Telegram Story: успешно опубликована ({label})", flush=True)
-            return True
-        print(f"  Telegram Story: попытка {label} не удалась: {res.get('description', res)}", flush=True)
-
+    # Публикуем сторис только с фотографией и подписью.
+    # Никаких clickable areas / areas поверх изображения не добавляем.
+    res = tg_call("postStory", data=base,
+                  files={"story_photo": ("story.jpg", img_bytes, "image/jpeg")})
+    if res.get("ok"):
+        print("  Telegram Story: успешно опубликована без кликабельной области", flush=True)
+        return True
+    print(f"  Telegram Story: попытка с подписью не удалась: {res.get('description', res)}", flush=True)
     # Final compatibility attempt: omit caption/parse_mode in case the API rejects caption metadata.
     minimal = {
         "business_connection_id": conn_id,
@@ -838,12 +832,10 @@ def main():
                 if done >= STORIES_PER_DAY:
                     break
                 link = f"https://t.me/{GROUP_USERNAME}/{mid}" if mid else f"https://t.me/{GROUP_USERNAME}"
-                built = make_story_image(car)
-                if not built:
+                img = make_story_image(car)
+                if not img:
                     continue
-                img, position = built
-                area = {"position": position, "type": {"type": "link", "url": link}}
-                if post_story(conn_id, img, story_caption(car, link), area):
+                if post_story(conn_id, img, story_caption(car, link))
                     done += 1
                     print(f"Сторис опубликована: {car['title']}", flush=True)
                 time.sleep(3)
