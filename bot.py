@@ -733,25 +733,28 @@ def post_story(conn_id, img_bytes, caption, area=None):
         "content": content,
         "active_period": 86400,
     }
-    attempts = []
+    attempts = [dict(base, caption=caption, parse_mode="HTML")]
     if area:
         attempts.append(dict(base, caption=caption, parse_mode="HTML", areas=json.dumps([area])))
-    attempts.append(dict(base, caption=caption, parse_mode="HTML"))
     attempts.append(dict(base))
     last = ""
     for i, data in enumerate(attempts, 1):
-        files = {"story_photo": ("story.jpg", img_bytes, "image/jpeg")}
-        res = tg_call("postStory", data=data, files=files)
-        if res.get("ok"):
-            print(f"  postStory OK (попытка {i})", flush=True)
-            return True, ""
-        last = str(res.get("description", res))
-        print(f"  postStory fail (попытка {i}): {last}", flush=True)
-        low = last.lower()
-        if "connection" in low or "business" in low:
-            break  # дальше пробовать бессмысленно: проблема в подключении
-        if "timed out" in low or "timeout" in low:
-            time.sleep(5)
+        for retry in range(2):
+            files = {"story_photo": ("story.jpg", img_bytes, "image/jpeg")}
+            res = tg_call("postStory", data=data, files=files)
+            if res.get("ok"):
+                print(f"  postStory OK (попытка {i})", flush=True)
+                return True, ""
+            last = str(res.get("description", res))
+            print(f"  postStory fail (попытка {i}.{retry + 1}): {last}", flush=True)
+            low = last.lower()
+            if "connection" in low or "business" in low:
+                return False, last
+            if "gateway" in low or "timed out" in low or "timeout" in low or "502" in low or "504" in low:
+                # Telegram мог всё же опубликовать — не плодим дубли, ждём и пробуем ещё раз
+                time.sleep(15)
+                continue
+            break
     return False, last
 
 
