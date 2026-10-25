@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Fix Telegram Stories only. Yandex Disk logic is left untouched."""
+"""Fix Telegram Stories: compress image + longer timeout + retries.
+Yandex Disk logic is left untouched.
+"""
 from pathlib import Path
 import ast
 
@@ -7,34 +9,75 @@ p = Path("bot.py")
 c = p.read_text(encoding="utf-8")
 orig = c
 
-# --- make_story_image: return (bytes, position) with corner_radius ---
-if "corner_radius_percentage" not in c:
-    old = (
-        "    buf = io.BytesIO()\n"
-        '    canvas.save(buf, "JPEG", quality=90, optimize=True)\n'
-        "    return buf.getvalue()\n"
-    )
-    new = (
-        "    position = {\n"
-        '        "x_percentage": 50.0,\n'
-        '        "y_percentage": round((by + btn_h / 2) / H * 100, 2),\n'
-        '        "width_percentage": round(card_w / W * 100, 2),\n'
-        '        "height_percentage": round(btn_h / H * 100, 2),\n'
-        '        "rotation_angle": 0.0,\n'
-        '        "corner_radius_percentage": 5.0,\n'
-        "    }\n"
-        "    buf = io.BytesIO()\n"
-        '    canvas.save(buf, "JPEG", quality=85, optimize=True)\n'
-        "    return buf.getvalue(), position\n"
-    )
-    if old not in c:
-        raise SystemExit("make_story return block not found")
-    c = c.replace(old, new, 1)
-    print("OK: make_story_image + corner_radius")
+# --- tg_call: longer timeout for postStory ---
+if 'to = (20, 300) if method == "postStory"' not in c:
+    if "timeout=120" in c:
+        c = c.replace(
+            "data=data, files=files, timeout=120)",
+            'data=data, files=files, timeout=((20, 300) if method == "postStory" else 60))',
+            1,
+        )
+        print("OK: tg_call postStory timeout 300s")
+    elif "timeout=60)" in c and "def tg_call" in c:
+        idx = c.find("def tg_call")
+        idx2 = c.find("timeout=", idx)
+        if idx2 > 0:
+            end = c.find(")", idx2)
+            c = c[:idx2] + 'timeout=((20, 300) if method == "postStory" else 60)' + c[end:]
+            print("OK: tg_call timeout patched")
+        else:
+            print("WARN: timeout= not found near tg_call")
+    else:
+        print("WARN: no known timeout pattern")
 else:
-    print("OK: corner_radius already present")
+    print("OK: postStory timeout already set")
 
-# --- replace post_story ---
+# --- make_story_image compress ---
+new_ret = (
+    "    position = {\n"
+    '        "x_percentage": 50.0,\n'
+    '        "y_percentage": round((by + btn_h / 2) / H * 100, 2),\n'
+    '        "width_percentage": round(card_w / W * 100, 2),\n'
+    '        "height_percentage": round(btn_h / H * 100, 2),\n'
+    '        "rotation_angle": 0.0,\n'
+    '        "corner_radius_percentage": 5.0,\n'
+    "    }\n"
+    "    canvas = canvas.resize((1080, 1920), Image.LANCZOS)\n"
+    "    data = None\n"
+    "    for q in (70, 55, 40, 30):\n"
+    "        buf = io.BytesIO()\n"
+    '        canvas.save(buf, "JPEG", quality=q, optimize=True)\n'
+    "        data = buf.getvalue()\n"
+    "        if len(data) <= 900_000:\n"
+    "            break\n"
+    '    print(f"  story image: {len(data)} bytes", flush=True)\n'
+    "    return data, position\n"
+)
+
+old_ret = (
+    "    buf = io.BytesIO()\n"
+    '    canvas.save(buf, "JPEG", quality=90, optimize=True)\n'
+    "    return buf.getvalue()\n"
+)
+
+if "story image:" not in c:
+    if old_ret in c:
+        c = c.replace(old_ret, new_ret, 1)
+        print("OK: make_story compress + corner_radius")
+    elif "corner_radius_percentage" in c:
+        start = c.find('    position = {\n        "x_percentage": 50.0')
+        end = c.find("def story_caption")
+        if start > 0 and end > start:
+            c = c[:start] + new_ret + "\n\n\n" + c[end:]
+            print("OK: recompress story image")
+        else:
+            raise SystemExit("cannot find position block to replace")
+    else:
+        raise SystemExit("make_story return block not found")
+else:
+    print("OK: story compress already present")
+
+# --- post_story ---
 start = c.find("def post_story(")
 end = c.find("\ndef main")
 if start < 0 or end < 0:
@@ -42,17 +85,8 @@ if start < 0 or end < 0:
 
 new_post = r'''def post_story(conn_id, img_bytes, caption, area=None):
     content = json.dumps({"type": "photo", "photo": "attach://story_photo"})
-    files = {"story_photo": ("story.jpg", img_bytes, "image/jpeg")}
     attempts = []
-    if area:
-        attempts.append({
-            "business_connection_id": conn_id,
-            "content": content,
-            "active_period": 86400,
-            "caption": caption,
-            "parse_mode": "HTML",
-            "areas": json.dumps([area]),
-        })
+    # without area first (more reliable under slow network)
     attempts.append({
         "business_connection_id": conn_id,
         "content": content,
@@ -65,17 +99,30 @@ new_post = r'''def post_story(conn_id, img_bytes, caption, area=None):
         "content": content,
         "active_period": 86400,
     })
+    if area:
+        attempts.append({
+            "business_connection_id": conn_id,
+            "content": content,
+            "active_period": 86400,
+            "caption": caption,
+            "parse_mode": "HTML",
+            "areas": json.dumps([area]),
+        })
     for i, data in enumerate(attempts, 1):
+        files = {"story_photo": ("story.jpg", img_bytes, "image/jpeg")}
         res = tg_call("postStory", data=data, files=files)
         if res.get("ok"):
             print(f"  postStory OK (попытка {i})", flush=True)
             return True
-        print(f"  postStory fail (попытка {i}): {res.get('description', res)}", flush=True)
+        desc = str(res.get("description", res))
+        print(f"  postStory fail (попытка {i}): {desc}", flush=True)
+        if "ReadTimeout" in desc or "timed out" in desc.lower():
+            time.sleep(5)
     return False
 
 
 '''
-c = c[:start] + new_post + c[end + 1 :]
+c = c[:start] + new_post + c[end + 1:]
 print("OK: post_story retries")
 
 # --- story loop ---
@@ -125,18 +172,17 @@ new_loop = r'''            done = 0
                 else:
                     fail_title = (car.get("title") or "?")[:40]
                     print(f"  не удалось: {fail_title}", flush=True)
-                time.sleep(5)
+                time.sleep(8)
             print(f"Сторис выложено: {done} из {STORIES_PER_DAY}", flush=True)
 '''
 
-if old_loop not in c:
+if old_loop in c:
+    c = c.replace(old_loop, new_loop, 1)
+    print("OK: story loop")
+elif "Сторис: готовлю" in c:
+    print("OK: story loop already patched")
+else:
     raise SystemExit("story loop not found")
-c = c.replace(old_loop, new_loop, 1)
-print("OK: story loop")
-
-if "timeout=120" not in c:
-    c = c.replace("timeout=60)", "timeout=120)", 1)
-    print("OK: timeout 120")
 
 ast.parse(c)
 if "upload_car_to_yandex" in orig and "upload_car_to_yandex" not in c:
