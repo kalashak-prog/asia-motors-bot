@@ -486,11 +486,28 @@ def format_caption(car, full=True):
     return "\n".join(lines)
 
 
+AI_FOOTER = (
+    "\n\n🤖 <b>Подбор авто с ИИ-помощником</b>\n"
+    "Напишите боту параметры, которые вас интересуют, или продиктуйте их голосом "
+    "(марка, год, пробег, бюджет) — помощник подберёт подходящий вариант.\n"
+    "Бот в Telegram: @AsiaMotorsRostovBot"
+)
+
+
 def build_caption(car):
+    """Подпись без футера (для очереди Instagram)."""
     cap = format_caption(car, full=True)
     if len(cap) > 1000:
         cap = format_caption(car, full=False)
     return cap[:1024]
+
+
+def build_caption_tg(car):
+    """Подпись для поста в Telegram: характеристики + блок про ИИ-помощника."""
+    cap = format_caption(car, full=True)
+    if len(cap) + len(AI_FOOTER) > 1024:
+        cap = format_caption(car, full=False)
+    return cap + AI_FOOTER
 
 
 # ======================= СТОРИС =======================
@@ -663,6 +680,10 @@ def story_caption(car, link):
     flag = "🇰🇷" if car.get("market") == "korea" else "🇨🇳"
     return (f"{flag} <b>{esc(car['title'])}</b>\n"
             f"💰 Под ключ до {esc(car.get('city', 'Владивостока'))}: <b>{esc(car['price'])}</b>\n\n"
+            f"🤖 <b>Подбор авто с ИИ-помощником</b>\n"
+            f"Напишите боту параметры или продиктуйте голосом "
+            f"(марка, год, пробег, бюджет) — помощник подберёт подходящий вариант.\n"
+            f"Бот: @AsiaMotorsRostovBot\n\n"
             f"👉 Подробности и фото в группе: {link}")
 
 
@@ -825,12 +846,13 @@ def main():
     for car in to_post:
         try:
             caption_html = build_caption(car)
+            caption_tg = build_caption_tg(car)
             media = []
             for i, data in enumerate(car["photos"]):
                 bio = io.BytesIO(data)
                 bio.name = f"photo{i}.jpg"
                 if i == 0:
-                    media.append(InputMediaPhoto(bio, caption=caption_html, parse_mode=ParseMode.HTML))
+                    media.append(InputMediaPhoto(bio, caption=caption_tg, parse_mode=ParseMode.HTML))
                 else:
                     media.append(InputMediaPhoto(bio))
             msgs = bot.send_media_group(chat_id=CHAT_ID, media=media, timeout=120)
