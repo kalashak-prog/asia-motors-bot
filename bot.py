@@ -639,9 +639,24 @@ def make_story_image(car):
     draw.text((W // 2, by + btn_h // 2), "Смотреть в группе  →",
               font=load_font(FONT_BOLD, 40), fill=(20, 20, 20), anchor="mm")
 
-    buf = io.BytesIO()
-    canvas.save(buf, "JPEG", quality=90, optimize=True)
-    return buf.getvalue()
+    position = {
+        "x_percentage": 50.0,
+        "y_percentage": round((by + btn_h / 2) / H * 100, 2),
+        "width_percentage": round(card_w / W * 100, 2),
+        "height_percentage": round(btn_h / H * 100, 2),
+        "rotation_angle": 0.0,
+        "corner_radius_percentage": 5.0,
+    }
+    canvas = canvas.resize((1080, 1920), Image.LANCZOS)
+    data = None
+    for q in (70, 55, 40, 30):
+        buf = io.BytesIO()
+        canvas.save(buf, "JPEG", quality=q, optimize=True)
+        data = buf.getvalue()
+        if len(data) <= 900_000:
+            break
+    print(f"  story image: {len(data)} bytes", flush=True)
+    return data, position
 
 
 def story_caption(car, link):
@@ -655,7 +670,7 @@ def tg_call(method, data=None, files=None):
     try:
         # Story uploads can take longer than ordinary Bot API requests.
         r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
-                          data=data, files=files, timeout=120)
+                          data=data, files=files, timeout=((20, 300) if method == "postStory" else 60))
         try:
             result = r.json()
         except Exception:
@@ -668,45 +683,76 @@ def tg_call(method, data=None, files=None):
         return {"ok": False, "description": f"{type(e).__name__}: {e}"}
 
 
+def check_connection(conn_id):
+    """Проверяет подключение к Business и пишет в лог понятную причину."""
+    res = tg_call("getBusinessConnection", data={"business_connection_id": conn_id})
+    if not res.get("ok"):
+        print(f"  ПРОВЕРКА ПОДКЛЮЧЕНИЯ: id не принят Telegram: {res.get('description', res)}", flush=True)
+        return False
+    r = res.get("result") or {}
+    rights = r.get("rights") or {}
+    print(f"  Подключение: is_enabled={r.get('is_enabled')}, "
+          f"can_manage_stories={rights.get('can_manage_stories')}", flush=True)
+    if r.get("is_enabled") is False:
+        print("  ПРОВЕРКА: подключение выключено (бот отключён в Telegram для бизнеса)", flush=True)
+        return False
+    if rights and not rights.get("can_manage_stories"):
+        print("  ПРОВЕРКА: у бота выключено «Управление историями»", flush=True)
+        return False
+    return True
+
+
 def find_business_connection():
-    # Telegram Bot API requires a specific business_connection_id for getBusinessConnection.
-    # The ID is normally saved from an incoming business_connection update or supplied as a secret.
-    configured = os.getenv("BUSINESS_CONNECTION_ID", "").strip()
-    if configured:
-        return configured
+    """Ищем СВЕЖИЙ business_connection_id в апдейтах (работает, если бота
+    только что переподключили и никто другой не забрал апдейт)."""
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+            json={"limit": 100, "timeout": 0, "allowed_updates": ["business_connection"]},
+            timeout=30,
+        )
+        data = r.json()
+        if not data.get("ok"):
+            print(f"  getUpdates: {data.get('description', data)}", flush=True)
+            return None
+        for upd in reversed(data.get("result") or []):
+            bc = upd.get("business_connection") or {}
+            if bc.get("id") and bc.get("is_enabled", True):
+                print(f"  найден свежий business_connection: {bc['id'][:12]}…", flush=True)
+                return bc["id"]
+        print("  getUpdates: апдейтов business_connection нет", flush=True)
+    except Exception as e:
+        print(f"  getUpdates: {type(e).__name__}: {e}", flush=True)
     return None
 
 
-def post_story(conn_id, img_bytes, caption):
+def post_story(conn_id, img_bytes, caption, area=None):
+    content = json.dumps({"type": "photo", "photo": "attach://story_photo"})
     base = {
         "business_connection_id": conn_id,
-        "content": json.dumps({"type": "photo", "photo": "attach://story_photo"}),
-        "active_period": 86400,
-        "caption": caption,
-        "parse_mode": "HTML",
-    }
-
-    # Публикуем сторис только с фотографией и подписью.
-    # Никаких clickable areas / areas поверх изображения не добавляем.
-    res = tg_call("postStory", data=base,
-                  files={"story_photo": ("story.jpg", img_bytes, "image/jpeg")})
-    if res.get("ok"):
-        print("  Telegram Story: успешно опубликована без кликабельной области", flush=True)
-        return True
-    print(f"  Telegram Story: попытка с подписью не удалась: {res.get('description', res)}", flush=True)
-    # Final compatibility attempt: omit caption/parse_mode in case the API rejects caption metadata.
-    minimal = {
-        "business_connection_id": conn_id,
-        "content": json.dumps({"type": "photo", "photo": "attach://story_photo"}),
+        "content": content,
         "active_period": 86400,
     }
-    res = tg_call("postStory", data=minimal,
-                  files={"story_photo": ("story.jpg", img_bytes, "image/jpeg")})
-    if res.get("ok"):
-        print("  Telegram Story: опубликована без подписи (резервная попытка)", flush=True)
-        return True
-    print(f"  Telegram Story: все попытки не удались: {res.get('description', res)}", flush=True)
-    return False
+    attempts = []
+    if area:
+        attempts.append(dict(base, caption=caption, parse_mode="HTML", areas=json.dumps([area])))
+    attempts.append(dict(base, caption=caption, parse_mode="HTML"))
+    attempts.append(dict(base))
+    last = ""
+    for i, data in enumerate(attempts, 1):
+        files = {"story_photo": ("story.jpg", img_bytes, "image/jpeg")}
+        res = tg_call("postStory", data=data, files=files)
+        if res.get("ok"):
+            print(f"  postStory OK (попытка {i})", flush=True)
+            return True, ""
+        last = str(res.get("description", res))
+        print(f"  postStory fail (попытка {i}): {last}", flush=True)
+        low = last.lower()
+        if "connection" in low or "business" in low:
+            break  # дальше пробовать бессмысленно: проблема в подключении
+        if "timed out" in low or "timeout" in low:
+            time.sleep(5)
+    return False, last
 
 
 def main():
@@ -804,18 +850,33 @@ def main():
 
     # ---- сторис ----
     try:
-        conn_id = os.getenv("BUSINESS_CONNECTION_ID")
-        if not conn_id:
-            stored = [x for x in posted if isinstance(x, str) and x.startswith(BC_PREFIX)]
-            if stored:
-                conn_id = stored[0][len(BC_PREFIX):]
-        if not conn_id:
+        env_id = (os.getenv("BUSINESS_CONNECTION_ID") or "").strip()
+        stored = [x for x in posted if isinstance(x, str) and x.startswith(BC_PREFIX)]
+        stored_id = stored[0][len(BC_PREFIX):] if stored else ""
+        conn_id = env_id or stored_id
+        src = "секрет" if env_id else ("posted_cars.json" if stored_id else "нет")
+        print(f"Сторис: business_connection_id из: {src}", flush=True)
+
+        # проверяем id; если мёртвый — пробуем найти свежий
+        if conn_id and not check_connection(conn_id):
+            print("Сторис: id не рабочий, ищу свежий…", flush=True)
+            fresh = find_business_connection()
+            for x in stored:
+                posted.discard(x)
+            conn_id = fresh
+            if fresh and check_connection(fresh):
+                posted.add(BC_PREFIX + fresh)
+            else:
+                conn_id = None
+        elif not conn_id:
             conn_id = find_business_connection()
             if conn_id:
                 posted.add(BC_PREFIX + conn_id)
 
         if not conn_id:
-            print("Сторис: бот не подключён к бизнес-аккаунту (Настройки → Telegram для бизнеса → Чат-боты).", flush=True)
+            print("Сторис: НЕТ РАБОЧЕГО business_connection_id. Отключите и снова подключите бота "
+                  "(Настройки → Telegram для бизнеса → Чат-боты) и сразу запустите workflow вручную, "
+                  "либо положите id в секрет BUSINESS_CONNECTION_ID.", flush=True)
         elif not published:
             print("Сторис: нет новых машин для сторис.", flush=True)
         else:
@@ -824,14 +885,25 @@ def main():
                 if done >= STORIES_PER_DAY:
                     break
                 link = f"https://t.me/{GROUP_USERNAME}/{mid}" if mid else f"https://t.me/{GROUP_USERNAME}"
-                img = make_story_image(car)
-                if not img:
+                print(f"Сторис: готовлю {(car.get('title') or '?')[:50]}…", flush=True)
+                built = make_story_image(car)
+                if not built:
+                    print("  пропуск: нет картинки", flush=True)
                     continue
-                if post_story(conn_id, img, story_caption(car, link)):
+                img, position = built if isinstance(built, tuple) else (built, {
+                    "x_percentage": 50.0, "y_percentage": 85.0,
+                    "width_percentage": 90.0, "height_percentage": 6.0,
+                    "rotation_angle": 0.0, "corner_radius_percentage": 5.0})
+                position.setdefault("corner_radius_percentage", 5.0)
+                area = {"position": position, "type": {"type": "link", "url": link}}
+                ok, err = post_story(conn_id, img, story_caption(car, link), area)
+                if ok:
                     done += 1
-                    print(f"Сторис опубликована: {car['title']}", flush=True)
-                time.sleep(3)
-            print(f"Сторис выложено: {done}", flush=True)
+                    print(f"Сторис опубликована ({done}/{STORIES_PER_DAY}): {car['title']}", flush=True)
+                else:
+                    print(f"  не удалось: {(car.get('title') or '?')[:40]} — {err}", flush=True)
+                time.sleep(8)
+            print(f"Сторис выложено: {done} из {STORIES_PER_DAY}", flush=True)
     except Exception as e:
         print(f"Ошибка сторис: {e}", flush=True)
 
